@@ -13,21 +13,33 @@ import (
 
 func main() {
 	// Replace "YOUR_BOT_TOKEN" with your actual bot token
-	botToken := "7510313727:AAHj81Bx4Iu32B6wFqpM4i28X_Z20ZEHryA"
+	// botToken := "7510313727:AAHj81Bx4Iu32B6wFqpM4i28X_Z20ZEHryA"
+
+	participantBotToken := "7549108057:AAEGxdZIaxMIYvO0oYOwWqvZES04IdSNa7o"
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(handler.OrganiserHandler),
+		bot.WithDefaultHandler(handler.ParticipantHandler),
 	}
 
-	b, err := bot.New(botToken, opts...)
+	// b, err := bot.New(botToken, opts...)
+	// if err != nil {
+	// 	log.Fatal("error creating bot: ", err)
+	// }
+
+	// b.Start(ctx)
+	// <-ctx.Done()
+	// log.Println("Bot stopped")
+
+	c, err := bot.New(participantBotToken, opts...)
 	if err != nil {
-		log.Fatal("error creating bot: ", err)
+		log.Fatal("error creating participant bot: ", err)
 	}
 
-	b.Start(ctx)
+	c.Start(ctx)
 	<-ctx.Done()
-	log.Println("Bot stopped")
+	log.Println("Participant Bot stopped")
 }
