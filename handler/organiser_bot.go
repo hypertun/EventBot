@@ -23,6 +23,7 @@ const (
 type UserState struct {
 	State        int
 	CurrentEvent model.Event
+	LastQuestion string // Store the last question asked
 }
 
 // Global map to store user states
@@ -88,6 +89,19 @@ func OrganiserHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		} else {
 			// Ask for the answer
 			question := update.Message.Text
+			if !strings.HasSuffix(question, "?") {
+				text = "Please make sure your question ends with a question mark '?'."
+				params = &bot.SendMessageParams{
+					ChatID: chatID,
+					Text:   text,
+				}
+				_, err := b.SendMessage(ctx, params)
+				if err != nil {
+					log.Println("error sending message:", err)
+				}
+				return
+			}
+			userState.LastQuestion = question // Store the question
 			// Create a new message to ask for the answer
 			params = &bot.SendMessageParams{
 				ChatID: chatID,
@@ -99,19 +113,16 @@ func OrganiserHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 			}
 
 			// Wait for the answer in the next update
-			// Add a temporary state to handle the answer
-			tempState := &UserState{State: StateAddingEventDetailsAnswer, CurrentEvent: userState.CurrentEvent}
-			userStates[userID] = tempState
+			userState.State = StateAddingEventDetailsAnswer // Change state to wait for answer
 			return
 		}
 	case StateAddingEventDetailsAnswer:
 		// Get the previous question
-		previousQuestion := userStates[userID].CurrentEvent.EventDetails[len(userStates[userID].CurrentEvent.EventDetails)-1].Question
 		answer := update.Message.Text
 		// Add the answer to the event details
-		userStates[userID].CurrentEvent.EventDetails[len(userStates[userID].CurrentEvent.EventDetails)-1].Answer = answer
+		userState.CurrentEvent.EventDetails = append(userState.CurrentEvent.EventDetails, model.EventDetails{Question: userState.LastQuestion, Answer: answer})
 		// Update the user state
-		userStates[userID] = &UserState{State: StateAddingEventDetails, CurrentEvent: userStates[userID].CurrentEvent}
+		userState.State = StateAddingEventDetails
 		text = "Detail added. Send another question or 'done' to finish."
 	default:
 		text = "An error occurred."
