@@ -17,6 +17,10 @@ const (
 	StateAddingEventName
 	StateAddingEventPicture
 	StateAddingEventDetails
+
+	//For participant bot
+	StatePersonalNotes
+	StateCheckIn
 )
 
 // User state data
@@ -118,6 +122,10 @@ func OrganiserHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		}
 	case StateAddingEventDetailsAnswer:
 		// Get the previous question
+<<<<<<< HEAD:handler/OrganiserBot.go
+		// previousQuestion := userStates[userID].CurrentEvent.EventDetails[len(userStates[userID].CurrentEvent.EventDetails)-1].Question
+=======
+>>>>>>> origin/main:handler/organiser_bot.go
 		answer := update.Message.Text
 		// Add the answer to the event details
 		userState.CurrentEvent.EventDetails = append(userState.CurrentEvent.EventDetails, model.EventDetails{Question: userState.LastQuestion, Answer: answer})
