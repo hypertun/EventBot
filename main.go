@@ -2,9 +2,7 @@ package main
 
 import (
 	"EventBot/handler"
-	"EventBot/repo"
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -19,10 +17,10 @@ func main() {
 
 	participantBotToken := "7549108057:AAEGxdZIaxMIYvO0oYOwWqvZES04IdSNa7o"
 
-	_, err := InitializeFirebase(context.Background())
-	if err != nil {
-		log.Fatal().Err(err).Msg("Error initializing Firebase")
-	}
+	// _, err := InitializeFirebase(context.Background())
+	// if err != nil {
+	// 	log.Fatal().Err(err).Msg("Error initializing Firebase")
+	// }
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -43,33 +41,33 @@ func main() {
 
 	c, err := bot.New(participantBotToken, opts...)
 	if err != nil {
-		log.Fatal("error creating participant bot: ", err)
+		log.Fatal().Err(err).Msg("error creating participant bot")
 	}
 
 	c.Start(ctx)
 	<-ctx.Done()
-	log.Println("Participant Bot stopped")
+	log.Info().Msg("Participant Bot stopped")
 }
 
-// InitializeFirebase initializes the Firebase connector and returns it
-func InitializeFirebase(ctx context.Context) (*repo.FirebaseConnector, error) {
-	// Get the service account key path from environment variable
-	serviceAccountKeyPath := os.Getenv("FIREBASE_SERVICE_ACCOUNT_KEY_PATH")
-	if serviceAccountKeyPath == "" {
-		return nil, fmt.Errorf("FIREBASE_SERVICE_ACCOUNT_KEY_PATH environment variable not set")
-	}
+// // InitializeFirebase initializes the Firebase connector and returns it
+// func InitializeFirebase(ctx context.Context) (*repo.FirebaseConnector, error) {
+// 	// Get the service account key path from environment variable
+// 	serviceAccountKeyPath := os.Getenv("FIREBASE_SERVICE_ACCOUNT_KEY_PATH")
+// 	if serviceAccountKeyPath == "" {
+// 		return nil, fmt.Errorf("FIREBASE_SERVICE_ACCOUNT_KEY_PATH environment variable not set")
+// 	}
 
-	// Get the database URL from environment variable
-	databaseURL := os.Getenv("FIREBASE_DATABASE_URL")
-	if databaseURL == "" {
-		return nil, fmt.Errorf("FIREBASE_DATABASE_URL environment variable not set")
-	}
+// 	// Get the database URL from environment variable
+// 	databaseURL := os.Getenv("FIREBASE_DATABASE_URL")
+// 	if databaseURL == "" {
+// 		return nil, fmt.Errorf("FIREBASE_DATABASE_URL environment variable not set")
+// 	}
 
-	// Create a new Firebase connector
-	firebaseConnector, err := NewFirebaseConnector(ctx, serviceAccountKeyPath, databaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("error creating Firebase connector: %v", err)
-	}
+// 	// Create a new Firebase connector
+// 	firebaseConnector, err := repo.NewFirebaseConnector(ctx, serviceAccountKeyPath, databaseURL)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("error creating Firebase connector: %v", err)
+// 	}
 
-	return firebaseConnector, nil
-}
+// 	return firebaseConnector, nil
+// }
