@@ -2,6 +2,7 @@ package handler
 
 import (
 	"EventBot/model"
+	"EventBot/repo"
 	"context"
 	"fmt"
 	"log"
@@ -11,12 +12,25 @@ import (
 	"github.com/go-telegram/bot/models"
 )
 
+type OrganiserBotHandler struct {
+	FirebaseConnector repo.FirestoreConnector
+}
+
+func NewOrganiserBotHandler(
+	FirebaseConnector repo.FirestoreConnector,
+) *OrganiserBotHandler {
+	return &OrganiserBotHandler{
+		FirebaseConnector: FirebaseConnector,
+	}
+}
+
 // Event creation states
 const (
 	StateIdle = iota
 	StateAddingEventName
 	StateAddingEventPicture
 	StateAddingEventDetails
+	StateDeleteEvent
 
 	//For participant bot
 	StatePersonalNotes
@@ -28,12 +42,13 @@ type UserState struct {
 	State        int
 	CurrentEvent model.Event
 	LastQuestion string // Store the last question asked
+	EventRefKey  string // Store the event's reference key
 }
 
 // Global map to store user states
 var userStates = make(map[int64]*UserState)
 
-func OrganiserHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
@@ -57,12 +72,15 @@ func OrganiserHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	case StateIdle:
 		switch update.Message.Text {
 		case "/start":
-			text = "Hello! I'm your EventBot. Use /addEvent to create a new event."
+			text = "Hello! I'm your EventBot. Use /addEvent to create a new event, or /deleteEvent to delete an existing event."
 		case "/help":
-			text = "I'm your EventBot. I can help you manage events. Use /addEvent to start creating an event."
+			text = "I'm your EventBot. I can help you manage events. Use /addEvent to start creating an event, or /deleteEvent to delete an existing event."
 		case "/addEvent":
 			text = "Okay, let's create a new event. What's the name of the event?"
 			userState.State = StateAddingEventName
+		case "/deleteEvent":
+			text = "Okay, let's delete an event. Please provide the Event Ref Key of the event you want to delete."
+			userState.State = StateDeleteEvent
 		default:
 			text = "I didn't understand that command. Use /start or /help."
 		}
@@ -82,14 +100,38 @@ func OrganiserHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		}
 	case StateAddingEventDetails:
 		if strings.ToLower(update.Message.Text) == "done" {
+			// Create the event in Firestore
+			refKey, err := o.FirebaseConnector.CreateEvent(ctx, userState.CurrentEvent)
+			if err != nil {
+				log.Println("error creating event:", err)
+				text = "Error creating event. Please try again."
+				userState.State = StateIdle
+				userState.CurrentEvent = model.Event{}
+				break
+			}
+			userState.EventRefKey = refKey
+
+			// Update the event with the refKey
+			userState.CurrentEvent.DocumentID = refKey
+			err = o.FirebaseConnector.UpdateEvent(ctx, refKey, userState.CurrentEvent)
+			if err != nil {
+				log.Println("error updating event with ref key:", err)
+				text = "Error updating event. Please try again."
+				userState.State = StateIdle
+				userState.CurrentEvent = model.Event{}
+				break
+			}
+
 			text = fmt.Sprintf("Event '%s' created successfully! Here are the details:\n", userState.CurrentEvent.Name)
 			for _, detail := range userState.CurrentEvent.EventDetails {
-				text += fmt.Sprintf("- %s: %s\n", detail.Question, detail.Answer)
+				text = fmt.Sprintf("- %s: %s\n", detail.Question, detail.Answer)
 			}
-			text += fmt.Sprintf("EDM File ID: %s", userState.CurrentEvent.EDMFileID)
+			text += fmt.Sprintf("EDM File ID: %s\n", userState.CurrentEvent.EDMFileID)
+			text += fmt.Sprintf("Event Ref Key: %s", userState.EventRefKey)
 			// Reset user state
 			userState.State = StateIdle
 			userState.CurrentEvent = model.Event{}
+			userState.EventRefKey = ""
 		} else {
 			// Ask for the answer
 			question := update.Message.Text
@@ -128,6 +170,16 @@ func OrganiserHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		// Update the user state
 		userState.State = StateAddingEventDetails
 		text = "Detail added. Send another question or 'done' to finish."
+	case StateDeleteEvent:
+		eventID := update.Message.Text
+		err := o.FirebaseConnector.DeleteEvent(ctx, eventID)
+		if err != nil {
+			log.Println("error deleting event:", err)
+			text = fmt.Sprintf("Error deleting event with ID '%s'. Please check the ID and try again.", eventID)
+		} else {
+			text = fmt.Sprintf("Event with ID '%s' has been successfully deleted.", eventID)
+		}
+		userState.State = StateIdle
 	default:
 		text = "An error occurred."
 		userState.State = StateIdle
@@ -143,9 +195,6 @@ func OrganiserHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	_, err := b.SendMessage(ctx, params)
 	if err != nil {
 		log.Println("error sending message:", err)
-	}
-	if userState.State == StateAddingEventDetails && strings.ToLower(update.Message.Text) != "done" && userStates[userID].State != StateAddingEventDetailsAnswer {
-		userStates[userID].CurrentEvent.EventDetails = append(userStates[userID].CurrentEvent.EventDetails, model.EventDetails{Question: update.Message.Text})
 	}
 }
 

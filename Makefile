@@ -5,5 +5,6 @@ define setup_env
     $(eval export)
 endef
 
-deploy: 
-    $(call setup_env, deploy)
+deploy:
+	$(call setup_env, deploy)
+	go run main.go
