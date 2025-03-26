@@ -1,15 +1,22 @@
 package model
 
 type Event struct {
-	Name         string
-	EDMFileID    string
-	EventDetails []EventDetails
+	Name         string        `firestore:"name"`
+	EDMFileID    string        `firestore:"edmFileID"`
+	EventDetails []QnA         `firestore:"eventDetails"`
+	Participants []Participant `firestore:"participants"`
 
 	//firebase
-	DocumentID string
+	DocumentID string `firestore:"documentID"`
 }
 
-type EventDetails struct {
+type QnA struct {
 	Question string
 	Answer   string
+}
+
+type Participant struct {
+	Name string `firestore:"name"`
+	QnAs []QnA  `firestore:"qnas"`
+	Code string `firestore:"code"`
 }

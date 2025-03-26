@@ -31,10 +31,8 @@ const (
 	StateAddingEventPicture
 	StateAddingEventDetails
 	StateDeleteEvent
-
-	//For participant bot
-	StatePersonalNotes
-	StateCheckIn
+	StateListParticipants
+	StateAddingEventDetailsAnswer = iota + 10
 )
 
 // User state data
@@ -78,6 +76,9 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		case "/addEvent":
 			text = "Okay, let's create a new event. What's the name of the event?"
 			userState.State = StateAddingEventName
+		case "/listParticipants":
+			text = "Okay, let's list the participants of an event. Please provide the Event Ref Key of the event."
+			userState.State = StateListParticipants
 		case "/deleteEvent":
 			text = "Okay, let's delete an event. Please provide the Event Ref Key of the event you want to delete."
 			userState.State = StateDeleteEvent
@@ -166,7 +167,7 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		// Get the previous question
 		answer := update.Message.Text
 		// Add the answer to the event details
-		userState.CurrentEvent.EventDetails = append(userState.CurrentEvent.EventDetails, model.EventDetails{Question: userState.LastQuestion, Answer: answer})
+		userState.CurrentEvent.EventDetails = append(userState.CurrentEvent.EventDetails, model.QnA{Question: userState.LastQuestion, Answer: answer})
 		// Update the user state
 		userState.State = StateAddingEventDetails
 		text = "Detail added. Send another question or 'done' to finish."
@@ -180,16 +181,41 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			text = fmt.Sprintf("Event with ID '%s' has been successfully deleted.", eventID)
 		}
 		userState.State = StateIdle
+	case StateListParticipants:
+		eventID := update.Message.Text
+		event, err := o.FirebaseConnector.ReadEvent(ctx, eventID)
+		if err != nil {
+			log.Println("error reading event:", err)
+			text = fmt.Sprintf("Error reading event with ID '%s'. Please check the ID and try again.", eventID)
+			userState.State = StateIdle
+			break
+		}
+
+		if len(event.Participants) == 0 {
+			text = fmt.Sprintf("No participants found for event '%s'.", event.Name)
+		} else {
+			text = fmt.Sprintf("Participants for event '%s':\n", event.Name)
+			for _, participant := range event.Participants {
+				text += fmt.Sprintf("- Name: %s\n", participant.Name)
+				text += fmt.Sprintf("  Code: %s\n", participant.Code)
+				if len(participant.QnAs) > 0 {
+					text += "  QnAs:\n"
+					for _, qna := range participant.QnAs {
+						text += fmt.Sprintf("    - Q: %s\n", qna.Question)
+						text += fmt.Sprintf("      A: %s\n", qna.Answer)
+					}
+				}
+			}
+		}
+		userState.State = StateIdle
 	default:
 		text = "An error occurred."
 		userState.State = StateIdle
 	}
 
-	if params == nil {
-		params = &bot.SendMessageParams{
-			ChatID: chatID,
-			Text:   text,
-		}
+	params = &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   text,
 	}
 
 	_, err := b.SendMessage(ctx, params)
@@ -197,7 +223,3 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		log.Println("error sending message:", err)
 	}
 }
-
-const (
-	StateAddingEventDetailsAnswer = iota + 10
-)
