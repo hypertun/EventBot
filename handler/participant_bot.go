@@ -481,10 +481,10 @@ func viewAllCommandsHandler(ctx context.Context, b *bot.Bot, update *models.Upda
 		}
 		kb.Button(cmd, []byte(cmd), viewAllCommandsKeyboardSelect)
 	}
-	kb.Row().Button("Cancel", []byte("cancel"), viewAllCommandsKeyboardSelect)
+	kb.Row().Button("Exit", []byte("cancel"), viewAllCommandsKeyboardSelect)
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      update.Message.Chat.ID,
-		Text:        "Commands\n\nUse /viewEvents to see your upcoming events, /pastEvents for past events, and /help for assistance.",
+		Text:        "Commands:\n• /start – Start interacting with me and see a quick introduction.\n• /viewEvents – View your upcoming events and details.\n• /pastEvents – See events you've attended previously.\n• /help – Get a reminder of commands and how to use me.\n• Exit – End the convo and make the bot go to sleep.",
 		ReplyMarkup: kb,
 	})
 	if err != nil {
@@ -498,7 +498,7 @@ func viewAllCommandsKeyboardSelect(ctx context.Context, b *bot.Bot, mes models.M
 	if cmd == "cancel" {
 		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: mes.Message.Chat.ID,
-			Text:   "Command cancelled.",
+			Text:   "Thanks for visiting me. Wake me up anytime using /start !",
 		})
 		if err != nil {
 			log.Println("error sending cancel message:", err)
