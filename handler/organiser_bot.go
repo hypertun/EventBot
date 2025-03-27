@@ -33,6 +33,8 @@ const (
 	StateDeleteEvent
 	StateListParticipants
 	StateAddingEventDetailsAnswer = iota + 10
+	StateCheckIn
+	StatePersonalNotes
 )
 
 // User state data

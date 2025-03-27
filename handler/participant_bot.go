@@ -292,7 +292,6 @@ func showEventDetails(ctx context.Context, b *bot.Bot, chatID int64, index int) 
 	kb := inline.New(b)
 	// Add buttons for FAQ and Personal Notes (existing flow)
 	kb.Row().Button("FAQ", []byte(fmt.Sprintf("faq_%d", index)), faqCallbackHandler)
-	kb.Row().Button("Add Personal Notes", []byte(fmt.Sprintf("notes_%d", index)), personalNotesCallbackHandler)
 
 	parsedTime, err := time.Parse("2006-01-02 15:04", event.Date)
 	if err != nil {
@@ -303,10 +302,12 @@ func showEventDetails(ctx context.Context, b *bot.Bot, chatID int64, index int) 
 
 	if !isEventInThePast {
 		// NEW: Add Check In button specific to this event.
-		kb.Row().Button("Check In", []byte(fmt.Sprintf("checkIn_%d", index)), checkInCallbackHandler)
+		kb.Button("Check In", []byte(fmt.Sprintf("checkIn_%d", index)), checkInCallbackHandler)
 	}
 	// Print boolean and string using fmt.Printf
 	fmt.Printf("Boolean: %t, String: %s\n", isEventInThePast, event.Date)
+
+	kb.Row().Button("Add Own Notes for Reference", []byte(fmt.Sprintf("notes_%d", index)), personalNotesCallbackHandler)
 
 	// Back button to return to the events list.
 	kb.Row().Button("Back", []byte(fmt.Sprintf("back_%d", index)), backToEventsCallbackHandler)
@@ -363,7 +364,7 @@ func personalNotesCallbackHandler(ctx context.Context, b *bot.Bot, mes models.Ma
 }
 
 func showPersonalNotes(ctx context.Context, b *bot.Bot, chatID int64, index int) {
-	notesText := "Notes Made By You (Tap note below to copy):\n<code>{placeholder}</code>\n\n<strong>Write a new message below for your personal reference</strong>\nNote that your previous notes will be overwritten"
+	notesText := "Your Saved Notes (Tap to Copy):\n<code>{placeholder}</code>\n\n\nDo know that by replying to this, you will overwrite your prior saved notes"
 	kb := inline.New(b)
 	kb.Row().Button("Back", []byte(fmt.Sprintf("back_%d", index)), backToEventDetailsCallbackHandler)
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
@@ -480,10 +481,10 @@ func viewAllCommandsHandler(ctx context.Context, b *bot.Bot, update *models.Upda
 		}
 		kb.Button(cmd, []byte(cmd), viewAllCommandsKeyboardSelect)
 	}
-	kb.Row().Button("Cancel", []byte("cancel"), viewAllCommandsKeyboardSelect)
+	kb.Row().Button("Exit", []byte("cancel"), viewAllCommandsKeyboardSelect)
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      update.Message.Chat.ID,
-		Text:        "Commands\n\nUse /viewEvents to see your upcoming events, /pastEvents for past events, and /help for assistance.",
+		Text:        "Commands:\n• /start – Start interacting with me and see a quick introduction.\n• /viewEvents – View your upcoming events and details.\n• /pastEvents – See events you've attended previously.\n• /help – Get a reminder of commands and how to use me.\n• Exit – End the convo and make the bot go to sleep.",
 		ReplyMarkup: kb,
 	})
 	if err != nil {
@@ -497,7 +498,7 @@ func viewAllCommandsKeyboardSelect(ctx context.Context, b *bot.Bot, mes models.M
 	if cmd == "cancel" {
 		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: mes.Message.Chat.ID,
-			Text:   "Command cancelled.",
+			Text:   "Thanks for visiting me. Wake me up anytime using /start !",
 		})
 		if err != nil {
 			log.Println("error sending cancel message:", err)
@@ -547,7 +548,7 @@ func ParticipantHandler(ctx context.Context, b *bot.Bot, update *models.Update) 
 		if username == "" {
 			username = update.Message.From.FirstName
 		}
-		text = fmt.Sprintf("Hello %s! I'm your personal AI agent to help manage your event sign-ups.\n\nUse /viewEvents to see upcoming events or /pastEvents for past events. For assistance, use /help.", username)
+		text = fmt.Sprintf("Hey %s! I'm your friendly event companion, here to make attending your events smooth and enjoyable—now and in the future.\n\nHere's how I can help:\n• Quickly view events you're attending: /viewEvents\n• Revisit past events: /pastEvents\n• Easily check-in at events using a simple code\n• Access useful event details and FAQs\n• Keep track of your own notes and reminders for each event\n\nJust type /help anytime to see what else I can do for you!", username)
 	case "/help":
 		viewAllCommandsHandler(ctx, b, update)
 		return
