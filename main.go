@@ -36,23 +36,27 @@ func main() {
 		*firebaseConnector,
 	)
 
-	opts := []bot.Option{
-		bot.WithDefaultHandler(organiserBotHandler.Handler),
-		// bot.WithDefaultHandler(handler.ParticipantHandler),
-	}
+	participantBotHandler := handler.NewParticipantBotHandler(
+		*firebaseConnector,
+	)
 
-	b, err := bot.New(organiserBotToken, opts...)
+	b, err := bot.New(organiserBotToken, []bot.Option{
+		bot.WithDefaultHandler(organiserBotHandler.Handler),
+	}...)
 	if err != nil {
 		log.Fatal().Err(err).Msg("error creating organiser bot")
 	}
 
-	c, err := bot.New(participantBotToken, opts...)
+	c, err := bot.New(participantBotToken, []bot.Option{
+		bot.WithDefaultHandler(participantBotHandler.Handler),
+	}...)
 	if err != nil {
 		log.Fatal().Err(err).Msg("error creating participant bot")
 	}
 
-	b.Start(ctx)
-	c.Start(ctx)
+	go b.Start(ctx)
+	go c.Start(ctx)
+
 	<-ctx.Done()
 	log.Info().Msg("Bots stopped")
 }

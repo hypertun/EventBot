@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 
 	"cloud.google.com/go/firestore"
 	firebase "firebase.google.com/go/v4"
@@ -29,13 +30,13 @@ func NewFirestoreConnector(ctx context.Context, serviceAccountKeyPath string, pr
 	}
 	app, err := firebase.NewApp(ctx, config, opt)
 	if err != nil {
-		return nil, fmt.Errorf("error initializing Firebase app: %v", err)
+		return nil, err
 	}
 
 	// Get a Firestore client
 	client, err := app.Firestore(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error getting Firestore client: %v", err)
+		return nil, err
 	}
 
 	return &FirestoreConnector{
@@ -49,7 +50,7 @@ func (fc *FirestoreConnector) CreateEvent(ctx context.Context, event model.Event
 	// Add a new document with a generated ID
 	docRef, _, err := fc.client.Collection("events").Add(ctx, event)
 	if err != nil {
-		return "", fmt.Errorf("error creating event: %v", err)
+		return "", err
 	}
 	return docRef.ID, nil
 }
@@ -58,15 +59,14 @@ func (fc *FirestoreConnector) CreateEvent(ctx context.Context, event model.Event
 func (fc *FirestoreConnector) ReadEvent(ctx context.Context, eventID string) (*model.Event, error) {
 	doc, err := fc.client.Collection("events").Doc(eventID).Get(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error reading event: %v", err)
+		return nil, err
 	}
 
 	var event model.Event
 	err = doc.DataTo(&event)
 	if err != nil {
-		return nil, fmt.Errorf("error converting document data to event: %v", err)
+		return nil, fmt.Errorf("error converting document data to event: %w", err)
 	}
-	event.DocumentID = doc.Ref.ID
 	return &event, nil
 }
 
@@ -74,7 +74,7 @@ func (fc *FirestoreConnector) ReadEvent(ctx context.Context, eventID string) (*m
 func (fc *FirestoreConnector) UpdateEvent(ctx context.Context, eventID string, event model.Event) error {
 	_, err := fc.client.Collection("events").Doc(eventID).Set(ctx, event)
 	if err != nil {
-		return fmt.Errorf("error updating event: %v", err)
+		return err
 	}
 	return nil
 }
@@ -83,7 +83,7 @@ func (fc *FirestoreConnector) UpdateEvent(ctx context.Context, eventID string, e
 func (fc *FirestoreConnector) DeleteEvent(ctx context.Context, eventID string) error {
 	_, err := fc.client.Collection("events").Doc(eventID).Delete(ctx)
 	if err != nil {
-		return fmt.Errorf("error deleting event: %v", err)
+		return err
 	}
 	return nil
 }
@@ -98,7 +98,7 @@ func (fc *FirestoreConnector) ListEvents(ctx context.Context) ([]model.Event, er
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("error iterating through events: %v", err)
+			return nil, err
 		}
 
 		var event model.Event
@@ -107,10 +107,161 @@ func (fc *FirestoreConnector) ListEvents(ctx context.Context) ([]model.Event, er
 			log.Printf("error converting document data to event: %v", err)
 			continue // Skip this document and continue with the next one
 		}
-		event.DocumentID = doc.Ref.ID
+		event.ID = doc.Ref.ID
 		events = append(events, event)
 	}
 	return events, nil
+}
+
+// CreateParticipant adds a new participant to the participants collection and then adds the participant's ID to the event's participant list
+func (fc *FirestoreConnector) CreateParticipant(ctx context.Context, eventID string, participant *model.Participant) error {
+	// Check if the event exists
+	event, err := fc.ReadEvent(ctx, eventID)
+	if err != nil {
+		return model.ErrEventDoesNotExist
+	}
+
+	// Check if the participant already exists for the event
+	existingParticipant, err := fc.ReadParticipantByUserID(ctx, participant.UserID)
+	if err == nil && existingParticipant != nil {
+		log.Printf("Participant with userID '%d' already exists", participant.UserID)
+
+		if !slices.Contains(existingParticipant.SignedUpEvents, eventID) {
+			existingParticipant.SignedUpEvents = append(existingParticipant.SignedUpEvents, eventID)
+			err = fc.UpdateParticipant(ctx, *existingParticipant)
+			if err != nil {
+				return err
+			}
+		}
+
+		participant = existingParticipant
+	} else if err != nil {
+		return err
+	} else {
+		participant.SignedUpEvents = append(participant.SignedUpEvents, eventID)
+		docRef, _, err := fc.client.Collection("participants").Add(ctx, participant)
+		if err != nil {
+			return err
+		}
+
+		participant.ID = docRef.ID
+		err = fc.UpdateParticipant(ctx, *participant)
+		if err != nil {
+			return err
+		}
+	}
+
+	if !slices.Contains(event.Participants, participant.ID) {
+		// Add the participant's ID to the event's participants list
+		event.Participants = append(event.Participants, participant.ID)
+		err = fc.UpdateEvent(ctx, eventID, *event)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ReadParticipant reads a participant from an event in Firestore by their code
+func (fc *FirestoreConnector) ReadParticipantByID(ctx context.Context, participantID string) (*model.Participant, error) {
+	doc, err := fc.client.Collection("participants").Doc(participantID).Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var participant model.Participant
+	err = doc.DataTo(&participant)
+	if err != nil {
+		return nil, err
+	}
+
+	return &participant, nil
+}
+
+// ReadParticipant reads a participant from an event in Firestore by their code
+func (fc *FirestoreConnector) ReadParticipantByUserID(ctx context.Context, userID int64) (*model.Participant, error) {
+	iter := fc.client.Collection("participants").Where("userid", "==", userID).Documents(ctx)
+	doc, err := iter.Next()
+	if err != nil {
+		if err == iterator.Done {
+			return nil, nil // Participant not found, return nil without error
+		}
+		return nil, err
+	}
+
+	var participant model.Participant
+	err = doc.DataTo(&participant)
+	if err != nil {
+		return nil, err
+	}
+
+	return &participant, nil
+}
+
+// UpdateParticipant updates an existing participant in an event in Firestore
+func (fc *FirestoreConnector) UpdateParticipant(ctx context.Context, participant model.Participant) error {
+	_, err := fc.client.Collection("participants").Doc(participant.ID).Set(ctx, participant)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// DeleteParticipant deletes a participant from an event in Firestore by their code
+func (fc *FirestoreConnector) DeleteParticipant(ctx context.Context, eventID string, participantCode string) error {
+	_, err := fc.client.Collection("participants").Doc(participantCode).Delete(ctx)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ListParticipants lists all participants from an event in Firestore
+func (fc *FirestoreConnector) ListParticipants(ctx context.Context, eventID string) ([]model.Participant, error) {
+	// Check if the event exists
+	event, err := fc.ReadEvent(ctx, eventID)
+	if err != nil {
+		return nil, model.ErrEventDoesNotExist
+	}
+
+	var participants []model.Participant
+	for _, participantID := range event.Participants {
+		participant, err := fc.ReadParticipantByID(ctx, participantID)
+		if err != nil {
+			log.Printf("error reading participant with ID '%s': %v", participantID, err)
+			continue // Skip this participant and continue with the next one
+		}
+		participants = append(participants, *participant)
+	}
+	return participants, nil
+}
+
+func (fc *FirestoreConnector) ListEventsByParticipantUserID(ctx context.Context, userID int64) ([]model.Event, error) {
+	// First, get the participant to check if they exist
+	participant, err := fc.ReadParticipantByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	if participant == nil {
+		return nil, model.ErrParticipantDoesNotExist
+	}
+
+	participantEvents := make([]model.Event, 0, len(participant.SignedUpEvents))
+
+	for i := range participant.SignedUpEvents {
+		event, err := fc.ReadEvent(ctx, participant.SignedUpEvents[i])
+		if err != nil {
+			return participantEvents, err
+		}
+
+		participantEvents = append(participantEvents, *event)
+	}
+
+	return participantEvents, nil
 }
 
 // Close closes the Firestore client
