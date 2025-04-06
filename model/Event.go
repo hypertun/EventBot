@@ -4,6 +4,7 @@ import "time"
 
 type Event struct {
 	ID           string    `firestore:"id"`
+	UserID       int64     `firestore:"userid"`
 	Name         string    `firestore:"name"`
 	EDMFileID    string    `firestore:"edmFileID"`
 	EventDate    time.Time `firestore:"eventDate"`
@@ -20,10 +21,15 @@ type Participant struct {
 	ID     string `firestore:"id"`
 	UserID int64  `firestore:"userid"`
 	Name   string `firestore:"name"`
-	QnAs   []QnA  `firestore:"qnas"`
 	Code   string `firestore:"code"`
 
-	SignedUpEvents []string `firestore:"signedUpEvents"` //list of events by id
+	SignedUpEvents []SignedUpEvent `firestore:"signedUpEvents"` //list of events by id
+}
+
+type SignedUpEvent struct {
+	EventID       string `firestore:"eventID"`
+	PersonalNotes string `firestore:"personalNotes"`
+	CheckedIn     bool   `firestore:"checkedIn"`
 }
 
 const (
@@ -35,7 +41,8 @@ const (
 	StateAddingEventDetails
 	StateDeleteEvent
 	StateListParticipants
-	StateAddingEventDetailsAnswer = iota + 10
+	StateBlastMessage
+	StateAddingEventDetailsAnswer
 
 	//Participant Bot
 	StateCheckIn

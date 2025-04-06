@@ -2,7 +2,6 @@ package model
 
 type UserState struct {
 	State        int
-	CurrentEvent Event
+	CurrentEvent *Event
 	LastQuestion string // Store the last question asked
-	EventRefKey  string // Store the event's reference key
 }

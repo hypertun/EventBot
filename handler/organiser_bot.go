@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -65,11 +66,39 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		case "/deleteEvent":
 			text = "Okay, let's delete an event. Please provide the Event Ref Key of the event you want to delete."
 			userState.State = model.StateDeleteEvent
+		case "/blast":
+			text = "Okay, let's send a message to all participants. Please provide the Event Ref Key of the event."
+			userState.State = model.StateBlastMessage
+		case "/viewEvents":
+			events, err := o.FirebaseConnector.ListEventsByUserID(ctx, update.Message.From.ID)
+			if err != nil {
+				log.Println("error listing events:", err)
+				text = "Error retrieving your events. Please try again."
+			} else if len(events) == 0 {
+				text = "You have not created any events yet."
+			} else {
+				text = "Here are your events:\n"
+				for _, event := range events {
+					text += fmt.Sprintf("- %s (Ref Key: %s)\n", event.Name, event.ID)
+					text += fmt.Sprintf("  Date: %s\n", event.EventDate.Format("2006-01-02"))
+					if len(event.EventDetails) > 0 {
+						text += "  Details:\n"
+						for _, detail := range event.EventDetails {
+							text += fmt.Sprintf("    - Q: %s\n", detail.Question)
+							text += fmt.Sprintf("      A: %s\n", detail.Answer)
+						}
+					}
+				}
+			}
+			userState.State = model.StateIdle
 		default:
 			text = "I didn't understand that command. Use /start or /help."
 		}
 	case model.StateAddingEventName:
-		userState.CurrentEvent.Name = update.Message.Text
+		userState.CurrentEvent = &model.Event{
+			Name:   update.Message.Text,
+			UserID: update.Message.From.ID,
+		}
 		text = "Great! Now, please send me the date of the event in this format: 'YYYY-MM-DD'."
 		userState.State = model.StateAddingEventDate
 	case model.StateAddingEventDate:
@@ -105,34 +134,32 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 	case model.StateAddingEventDetails:
 		if strings.ToLower(update.Message.Text) == "done" {
 			// Create the event in Firestore
-			refKey, err := o.FirebaseConnector.CreateEvent(ctx, userState.CurrentEvent)
+			refKey, err := o.FirebaseConnector.CreateEvent(ctx, *userState.CurrentEvent)
 			if err != nil {
 				log.Println("error creating event:", err)
 				text = "Error creating event. Please try again."
 				userState.State = model.StateIdle
-				userState.CurrentEvent = model.Event{}
+				userState.CurrentEvent = nil
 				break
 			}
-			userState.EventRefKey = refKey
 
 			// Update the event with the refKey
 			userState.CurrentEvent.ID = refKey
-			err = o.FirebaseConnector.UpdateEvent(ctx, refKey, userState.CurrentEvent)
+			err = o.FirebaseConnector.UpdateEvent(ctx, refKey, *userState.CurrentEvent)
 			if err != nil {
 				log.Println("error updating event with ref key:", err)
 				text = "Error updating event. Please try again."
 				userState.State = model.StateIdle
-				userState.CurrentEvent = model.Event{}
+				userState.CurrentEvent = nil
 				break
 			}
 
 			text = fmt.Sprintf("Event '%s' created successfully! Here are the details:\n", userState.CurrentEvent.Name)
 			text += fmt.Sprintf("EDM File ID: %s\n", userState.CurrentEvent.EDMFileID)
-			text += fmt.Sprintf("Event Ref Key: %s", userState.EventRefKey)
+			text += fmt.Sprintf("Event Ref Key: %s", userState.CurrentEvent.ID)
 			// Reset user state
 			userState.State = model.StateIdle
-			userState.CurrentEvent = model.Event{}
-			userState.EventRefKey = ""
+			userState.CurrentEvent = &model.Event{}
 		} else {
 			// Ask for the answer
 			question := update.Message.Text
@@ -206,16 +233,81 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			for i := range participants {
 				text += fmt.Sprintf("- Name: %s\n", participants[i].Name)
 				text += fmt.Sprintf("  Code: %s\n", participants[i].Code)
-				if len(participants[i].QnAs) > 0 {
-					text += "  QnAs:\n"
-					for _, qna := range participants[i].QnAs {
-						text += fmt.Sprintf("    - Q: %s\n", qna.Question)
-						text += fmt.Sprintf("      A: %s\n", qna.Answer)
-					}
-				}
 			}
 		}
 		userState.State = model.StateIdle
+	case model.StateBlastMessage:
+		if userState.CurrentEvent == nil {
+			event, err := o.FirebaseConnector.ReadEvent(ctx, update.Message.Text)
+			if err != nil {
+				log.Println("error reading event:", err)
+				_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+					ChatID: update.Message.Chat.ID,
+					Text:   "Error retrieving event. Please try again.",
+				})
+				if err != nil {
+					log.Println("error sending message:", err)
+				}
+				userState.State = model.StateIdle
+				return
+			}
+			_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: update.Message.Chat.ID,
+				Text:   "Please key in the message you want to send to all participants.",
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.CurrentEvent = event
+			return
+		}
+
+		defer func() {
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+		}()
+
+		eventID := userState.CurrentEvent.ID
+		message := update.Message.Text
+
+		participants, err := o.FirebaseConnector.ListParticipants(ctx, eventID)
+		if err != nil {
+			log.Println(fmt.Sprintf("error reading participants for event(ID: %s): %v", eventID, err))
+			_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: update.Message.Chat.ID,
+				Text:   "Error retrieving participants. Please try again.",
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			return
+		}
+
+		sort.Slice(participants, func(i, j int) bool {
+			return participants[i].Name < participants[j].Name
+		})
+		fmt.Println(update.Message.Chat.ID)
+		for _, participant := range participants {
+			var eventDetails string
+			if len(userState.CurrentEvent.EventDetails) > 0 {
+				eventDetails += "Event Details:\n"
+				for _, detail := range userState.CurrentEvent.EventDetails {
+					eventDetails += fmt.Sprintf("  - Q: %s\n", detail.Question)
+					eventDetails += fmt.Sprintf("    A: %s\n", detail.Answer)
+				}
+			}
+			_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: participant.UserID,
+				Text: fmt.Sprintf(`Message from the organiser:
+		%s		
+		%s
+		Event Name: %s
+		Event Date: %s`, message, eventDetails, userState.CurrentEvent.Name, userState.CurrentEvent.EventDate.Format("2006-01-02")),
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+		}
 	default:
 		text = "An error occurred."
 		userState.State = model.StateIdle

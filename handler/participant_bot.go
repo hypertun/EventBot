@@ -66,6 +66,10 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 			Quickly view events you're attending: /viewEvents
 			Revisit past events: /pastEvents
 			Join an event: /joinEvent
+			Keep track of your own notes and reminders for each event: /notes
+			Check in to an event: /checkIn
+
+
 			Easily check-in at events using a simple code
 			Access useful event details and FAQs
 			Keep track of your own notes and reminders for each event
@@ -79,6 +83,9 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 			/pastEvents – See events you've attended previously.
 			/joinEvent - Join an event.
 			/help – Get a reminder of commands and how to use me.
+			/notes - Add or view personal notes for an event.
+			/checkIn - Check in to an event.
+
 			`
 		case "/viewEvents":
 			p.viewEventsHandler(ctx, false)
@@ -91,12 +98,28 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 		case "/joinEvent":
 			text = "Please provide the Event Ref Key of the event you want to join."
 			userState.State = model.StateJoinEvent
+		case "/notes":
+			text = `Please provide the Event Ref Key to view/add personal notes.`
+			userState.State = model.StatePersonalNotes
+		case "/checkIn":
+			text = "Please provide the Event Ref Key of the event you want to check in to."
+			userState.State = model.StateCheckIn
 		default:
 			text = "I didn't understand that command. Use /start or /help."
 		}
 	case model.StateJoinEvent:
 		p.handleJoinEvent(ctx)
 		userState.State = model.StateIdle
+		return
+	case model.StatePersonalNotes:
+		if userState.CurrentEvent == nil {
+			p.handlePersonalNotes(ctx)
+		} else {
+			p.handlePersonalNotesReply(ctx)
+		}
+		return
+	case model.StateCheckIn:
+		p.handleCheckIn(ctx)
 		return
 	default:
 		text = "An error occurred."
@@ -112,6 +135,296 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 	if err != nil {
 		log.Println("error sending message:", err)
 	}
+}
+
+func (p *ParticipantBotHandler) handleCheckIn(ctx context.Context) {
+	userID := p.update.Message.From.ID
+	if userPBotStates[userID].CurrentEvent == nil {
+		event, err := p.FirebaseConnector.ReadEvent(ctx, p.update.Message.Text)
+		if err != nil {
+			log.Println("error reading event:", err)
+			_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: p.update.Message.Chat.ID,
+				Text:   "Error checking you in. Please try again.",
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userPBotStates[p.update.Message.From.ID].State = model.StateIdle
+			return
+		}
+		if event.EventDate.Format(time.DateOnly) != time.Now().Format(time.DateOnly) {
+			_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: p.update.Message.Chat.ID,
+				Text:   "You can only check in to this event on the date of the event itself.",
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userPBotStates[p.update.Message.From.ID].State = model.StateIdle
+			return
+		}
+
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "Please key in your check in code.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		userPBotStates[userID].CurrentEvent = event
+		return
+	}
+
+	defer func() {
+		userPBotStates[p.update.Message.From.ID].State = model.StateIdle
+		userPBotStates[p.update.Message.From.ID].CurrentEvent = nil
+	}()
+
+	eventID := userPBotStates[p.update.Message.From.ID].CurrentEvent.ID
+	participant, err := p.FirebaseConnector.ReadParticipantByUserID(ctx, p.update.Message.From.ID)
+	if err != nil {
+		log.Println("error reading participant:", err)
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "Error retrieving your details. Please try again.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	if participant == nil {
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "You are not registered for any events. Please join an event first.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	if p.update.Message.Text != participant.Code {
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "Wrong check in code. Please try again.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	var signedUpEvent *model.SignedUpEvent
+	for i := range participant.SignedUpEvents {
+		if participant.SignedUpEvents[i].EventID == eventID {
+			signedUpEvent = &participant.SignedUpEvents[i]
+			break
+		}
+	}
+
+	if signedUpEvent == nil {
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "You are not registered for this event. Please join the event first.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	if signedUpEvent.CheckedIn {
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "You have already checked in to this event.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	if participant.Code != p.update.Message.Text {
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "You entered the wrong check in",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	signedUpEvent.CheckedIn = true
+	err = p.FirebaseConnector.UpdateParticipant(ctx, *participant)
+	if err != nil {
+		log.Println("error updating participant:", err)
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "Error checking you in. Please try again.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: p.update.Message.Chat.ID,
+		Text:   "You have successfully checked in!",
+	})
+	if err != nil {
+		log.Println("error sending message:", err)
+	}
+}
+
+func (p *ParticipantBotHandler) handlePersonalNotes(ctx context.Context) {
+	eventID := p.update.Message.Text
+	participant, err := p.FirebaseConnector.ReadParticipantByUserID(ctx, p.update.Message.From.ID)
+	if err != nil {
+		log.Println("error reading participant:", err)
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "Error retrieving your details. Please try again.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	if participant == nil {
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "You are not registered for any events. Please join an event first.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	var signedUpEvent *model.SignedUpEvent
+	for i := range participant.SignedUpEvents {
+		if participant.SignedUpEvents[i].EventID == eventID {
+			signedUpEvent = &participant.SignedUpEvents[i]
+			break
+		}
+	}
+
+	if signedUpEvent == nil {
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "You are not registered for this events. Please join the event first.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		userPBotStates[p.update.Message.From.ID].State = model.StateIdle
+		return
+	}
+
+	_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    p.update.Message.Chat.ID,
+		Text:      fmt.Sprintf("Your current notes for this event:\n<code>%s</code>\n\nDo you want to modify these notes? (yes/no)", signedUpEvent.PersonalNotes),
+		ParseMode: "HTML",
+	})
+	if err != nil {
+		log.Println("error sending message:", err)
+	}
+	userPBotStates[p.update.Message.From.ID].CurrentEvent = &model.Event{
+		ID: eventID,
+	}
+	userPBotStates[p.update.Message.From.ID].State = model.StatePersonalNotes
+}
+
+func (p *ParticipantBotHandler) handlePersonalNotesReply(ctx context.Context) {
+	userID := p.update.Message.From.ID
+	userState := userPBotStates[userID]
+
+	eventID := userPBotStates[userID].CurrentEvent.ID
+	participant, err := p.FirebaseConnector.ReadParticipantByUserID(ctx, p.update.Message.From.ID)
+	if err != nil {
+		log.Println("error reading participant:", err)
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "Error retrieving your details. Please try again.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	if participant == nil {
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "You are not registered for any events. Please join an event first.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	if userState.State == model.StatePersonalNotes {
+		if p.update.Message.Text == "yes" {
+			_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: p.update.Message.Chat.ID,
+				Text:   "Please enter your new notes.",
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StatePersonalNotes
+			return
+		} else if p.update.Message.Text == "no" {
+			_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: p.update.Message.Chat.ID,
+				Text:   "Okay, your notes remain unchanged.",
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			return
+		}
+	}
+
+	newNotes := p.update.Message.Text
+	for i, signedUpEvent := range participant.SignedUpEvents {
+		if signedUpEvent.EventID == eventID {
+			participant.SignedUpEvents[i].PersonalNotes = newNotes
+			break
+		}
+	}
+
+	err = p.FirebaseConnector.UpdateParticipant(ctx, *participant)
+	if err != nil {
+		log.Println("error updating participant:", err)
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: p.update.Message.Chat.ID,
+			Text:   "Error updating your notes. Please try again.",
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
+	_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: p.update.Message.Chat.ID,
+		Text:   "Your notes have been updated.",
+	})
+	if err != nil {
+		log.Println("error sending message:", err)
+	}
+	userState.CurrentEvent = nil
+	userState.State = model.StateIdle
 }
 
 func (p *ParticipantBotHandler) handleJoinEvent(ctx context.Context) {
@@ -139,7 +452,9 @@ func (p *ParticipantBotHandler) handleJoinEvent(ctx context.Context) {
 
 	_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: userID,
-		Text:   fmt.Sprintf("You have successfully joined event '%s'!", eventID),
+		Text: fmt.Sprintf(`You have successfully joined event '%s'!
+This is you checkIn code: %s
+		`, eventID, participant.Code),
 	})
 	if err != nil {
 		log.Println("error sending message:", err)
@@ -432,158 +747,3 @@ func (p *ParticipantBotHandler) viewEventsHandler(ctx context.Context, past bool
 // 		}
 // 	}
 // }
-
-// // ------------------- Personal Notes, FAQ, and Back Flows -------------------
-
-// // (Existing functions for personal notes, FAQ, and back navigation remain unchanged.)
-
-// func personalNotesCallbackHandler(ctx context.Context, b *bot.Bot, mes models.MaybeInaccessibleMessage, data []byte) {
-// 	input := string(data)
-// 	const prefix = "notes_"
-// 	if len(input) <= len(prefix) || input[:len(prefix)] != prefix {
-// 		log.Printf("invalid callback data format, expected prefix 'notes_', got: %q", input)
-// 		return
-// 	}
-// 	var index int
-// 	_, err := fmt.Sscanf(input, "notes_%d", &index)
-// 	if err != nil {
-// 		log.Println("error parsing personal notes index:", err)
-// 		return
-// 	}
-// 	chatID := mes.Message.Chat.ID
-// 	cs, ok := chatStates[chatID]
-// 	if !ok {
-// 		cs = &ChatState{}
-// 		chatStates[chatID] = cs
-// 	}
-// 	cs.State = StatePersonalNotes
-// 	cs.PersonalNoteEventIndex = index
-// 	log.Printf("Chat %d set to StatePersonalNotes for event %d", chatID, index)
-// 	showPersonalNotes(ctx, b, chatID, index)
-// }
-
-// func showPersonalNotes(ctx context.Context, b *bot.Bot, chatID int64, index int) {
-// 	notesText := "Your Saved Notes (Tap to Copy):\n<code>{placeholder}</code>\n\n\nDo know that by replying to this, you will overwrite your prior saved notes"
-// 	kb := inline.New(b)
-// 	kb.Row().Button("Back", []byte(fmt.Sprintf("back_%d", index)), backToEventDetailsCallbackHandler)
-// 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 		ChatID:      chatID,
-// 		Text:        notesText,
-// 		ReplyMarkup: kb,
-// 		ParseMode:   "HTML",
-// 	})
-// 	if err != nil {
-// 		log.Println("error sending personal notes message:", err)
-// 	}
-// }
-
-// func handlePersonalNotesReply(ctx context.Context, b *bot.Bot, update *models.Update) {
-// 	chatID := update.Message.Chat.ID
-// 	cs, ok := chatStates[chatID]
-// 	if !ok || cs.State != StatePersonalNotes {
-// 		return
-// 	}
-// 	cs.PersonalNote = update.Message.Text
-// 	cs.State = StateIdle
-// 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 		ChatID: chatID,
-// 		Text:   "Your note has been saved!",
-// 	})
-// 	if err != nil {
-// 		log.Println("error sending note confirmation:", err)
-// 	}
-// 	showEventDetails(ctx, b, chatID, cs.PersonalNoteEventIndex)
-// }
-
-// func backToEventDetailsCallbackHandler(ctx context.Context, b *bot.Bot, mes models.MaybeInaccessibleMessage, data []byte) {
-// 	var index int
-// 	_, err := fmt.Sscanf(string(data), "back_%d", &index)
-// 	if err != nil {
-// 		log.Println("error parsing back index:", err)
-// 		return
-// 	}
-// 	chatID := mes.Message.Chat.ID
-// 	if cs, ok := chatStates[chatID]; ok {
-// 		cs.State = StateIdle
-// 	}
-// 	showEventDetails(ctx, b, chatID, index)
-// }
-
-// func backToEventsCallbackHandler(ctx context.Context, b *bot.Bot, mes models.MaybeInaccessibleMessage, data []byte) {
-// 	viewEventsHandler(ctx, b, &models.Update{Message: mes.Message})
-// }
-
-// func faqCallbackHandler(ctx context.Context, b *bot.Bot, mes models.MaybeInaccessibleMessage, data []byte) {
-// 	input := string(data)
-// 	const prefix = "faq_"
-// 	if len(input) <= len(prefix) || input[:len(prefix)] != prefix {
-// 		log.Printf("invalid callback data format, expected prefix 'faq_', got: %q", input)
-// 		return
-// 	}
-// 	var index int
-// 	_, err := fmt.Sscanf(input, "faq_%d", &index)
-// 	if err != nil {
-// 		log.Println("error parsing FAQ index:", err)
-// 		return
-// 	}
-// 	showFAQ(ctx, b, mes.Message.Chat.ID, index)
-// }
-
-// func showFAQ(ctx context.Context, b *bot.Bot, chatID int64, index int) {
-// 	events := fakeEvents()
-// 	if index < 0 || index >= len(events) {
-// 		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 			ChatID: chatID,
-// 			Text:   "Invalid event for FAQ.",
-// 		})
-// 		if err != nil {
-// 			log.Println("error sending message:", err)
-// 		}
-// 		return
-// 	}
-// 	event := events[index]
-// 	faqText := "FAQs:\n1. Q: What is this event?\n   A: It's a demo event.\n\n2. Q: How can I sign up?\n   A: Visit our website for details."
-// 	kb := inline.New(b)
-// 	kb.Row().Button("Back", []byte(fmt.Sprintf("back_%d", index)), backToEventDetailsCallbackHandler)
-// 	if event.MediaImage != "" {
-// 		_, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
-// 			ChatID:      chatID,
-// 			Photo:       &models.InputFileString{Data: event.MediaImage},
-// 			Caption:     faqText,
-// 			ReplyMarkup: kb,
-// 		})
-// 		if err != nil {
-// 			log.Println("error sending FAQ photo:", err)
-// 		}
-// 	} else {
-// 		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 			ChatID:      chatID,
-// 			Text:        faqText,
-// 			ReplyMarkup: kb,
-// 		})
-// 		if err != nil {
-// 			log.Println("error sending FAQ message:", err)
-// 		}
-// 	}
-// }
-
-// 	func checkEventExists(ctx context.Context, eventID string, cs *ChatState) (*model.Event, error) {
-// 		//check if event exists
-// 		for _, event := range events {
-// 			if event.DocumentID == eventID {
-// 				cs.EventRefKey = eventID
-// 				return &model.Event{
-// 					Name: event.Name,
-// 				}, nil
-// 			}
-// 		}
-// 		return nil, fmt.Errorf("event with ID '%s' not found", eventID)
-// 	}
-
-// 	func addParticipantToEvent(ctx context.Context, eventID string, user *models.User, cs *ChatState) error {
-// 		// Add the user to the event's participant list
-// 		// In a real implementation, you would interact with Firestore here.
-// 		// For this example, we'll just log the action.
-// 		log.Printf("User %s (%d) joined event %s", user.FirstName, user.ID, eventID)
-// 		return nil
-// 	 }

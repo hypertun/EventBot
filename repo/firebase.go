@@ -89,8 +89,8 @@ func (fc *FirestoreConnector) DeleteEvent(ctx context.Context, eventID string) e
 }
 
 // ListEvents lists all events from Firestore
-func (fc *FirestoreConnector) ListEvents(ctx context.Context) ([]model.Event, error) {
-	iter := fc.client.Collection("events").Documents(ctx)
+func (fc *FirestoreConnector) ListEventsByUserID(ctx context.Context, userID int64) ([]model.Event, error) {
+	iter := fc.client.Collection("events").Where("userid", "==", userID).Documents(ctx)
 	var events []model.Event
 	for {
 		doc, err := iter.Next()
@@ -126,8 +126,21 @@ func (fc *FirestoreConnector) CreateParticipant(ctx context.Context, eventID str
 	if err == nil && existingParticipant != nil {
 		log.Printf("Participant with userID '%d' already exists", participant.UserID)
 
-		if !slices.Contains(existingParticipant.SignedUpEvents, eventID) {
-			existingParticipant.SignedUpEvents = append(existingParticipant.SignedUpEvents, eventID)
+		// Check if the participant is already signed up for the event
+		exist := false
+		for i := range existingParticipant.SignedUpEvents {
+			if existingParticipant.SignedUpEvents[i].EventID == eventID {
+				exist = true
+				break
+			}
+		}
+
+		if !exist {
+			existingParticipant.SignedUpEvents = append(existingParticipant.SignedUpEvents, model.SignedUpEvent{
+				EventID:       eventID,
+				PersonalNotes: "",
+				CheckedIn:     false,
+			})
 			err = fc.UpdateParticipant(ctx, *existingParticipant)
 			if err != nil {
 				return err
@@ -138,7 +151,11 @@ func (fc *FirestoreConnector) CreateParticipant(ctx context.Context, eventID str
 	} else if err != nil {
 		return err
 	} else {
-		participant.SignedUpEvents = append(participant.SignedUpEvents, eventID)
+		participant.SignedUpEvents = append(participant.SignedUpEvents, model.SignedUpEvent{
+			EventID:       eventID,
+			PersonalNotes: "",
+			CheckedIn:     false,
+		})
 		docRef, _, err := fc.client.Collection("participants").Add(ctx, participant)
 		if err != nil {
 			return err
@@ -253,7 +270,7 @@ func (fc *FirestoreConnector) ListEventsByParticipantUserID(ctx context.Context,
 	participantEvents := make([]model.Event, 0, len(participant.SignedUpEvents))
 
 	for i := range participant.SignedUpEvents {
-		event, err := fc.ReadEvent(ctx, participant.SignedUpEvents[i])
+		event, err := fc.ReadEvent(ctx, participant.SignedUpEvents[i].EventID)
 		if err != nil {
 			return participantEvents, err
 		}
