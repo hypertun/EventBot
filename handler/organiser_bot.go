@@ -51,7 +51,13 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 	case model.StateIdle:
 		switch update.Message.Text {
 		case "/start":
-			text = "Hello! I'm your EventBot. Use /addEvent to create a new event, or /deleteEvent to delete an existing event."
+			text = `Hello! I'm your EventBot. Use the following commands to manage events:
+			/addEvent - Create a new event
+			/deleteEvent <event_ref_key> - Delete an existing event
+			/listParticipants <event_ref_key> - List participants of an event
+			/blast <event_ref_key> - Send a message to all participants
+			/viewEvents - View all your events
+			/help - Show this help message`
 		case "/help":
 			text = "I'm your EventBot. I can help you manage events. Use /addEvent to start creating an event, or /deleteEvent to delete an existing event."
 		case "/addEvent":
@@ -104,8 +110,8 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 	case model.StateAddingEventDate:
 		// Validate the date format
 		eventDate, err := time.Parse("2006-01-02", update.Message.Text)
-		if err != nil {
-			text = "Invalid date format. Please use 'YYYY-MM-DD' (e.g., 2023-12-25)."
+		if err != nil || eventDate.Before(time.Now()) {
+			text = "Invalid date format. Please use 'YYYY-MM-DD' (e.g., 2023-12-25) and ensure it's not in the past."
 			params = &bot.SendMessageParams{
 				ChatID: chatID,
 				Text:   text,
