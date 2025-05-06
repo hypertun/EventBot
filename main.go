@@ -10,10 +10,16 @@ import (
 	"syscall"
 
 	"github.com/go-telegram/bot"
+	"github.com/joho/godotenv"
 	"github.com/rs/zerolog/log"
 )
 
 func main() {
+	err := godotenv.Load("deploy.env")
+	if err != nil {
+		log.Fatal().Msgf("Error loading .env file: %v", err)
+	}
+
 	organiserBotToken := os.Getenv("ORGANISER_BOT_TOKEN")
 	if organiserBotToken == "" {
 		log.Fatal().Msg("ORGANISER_BOT_TOKEN environment variable not set")

@@ -3,8 +3,10 @@ module EventBot
 go 1.24.0
 
 require (
+	cloud.google.com/go/firestore v1.18.0
 	firebase.google.com/go/v4 v4.15.2
 	github.com/go-telegram/bot v1.14.1
+	github.com/joho/godotenv v1.5.1
 	github.com/rs/zerolog v1.34.0
 	google.golang.org/api v0.227.0
 )
@@ -15,7 +17,6 @@ require (
 	cloud.google.com/go/auth v0.15.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.7 // indirect
 	cloud.google.com/go/compute/metadata v0.6.0 // indirect
-	cloud.google.com/go/firestore v1.18.0 // indirect
 	cloud.google.com/go/iam v1.2.2 // indirect
 	cloud.google.com/go/longrunning v0.6.2 // indirect
 	cloud.google.com/go/monitoring v1.21.2 // indirect
@@ -31,7 +32,6 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/go-telegram/ui v0.5.0 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.1 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
