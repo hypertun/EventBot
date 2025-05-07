@@ -53,9 +53,9 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		case "/start":
 			text = `Hello! I'm your EventBot. Use the following commands to manage events:
 			/addEvent - Create a new event
-			/deleteEvent <event_ref_key> - Delete an existing event
-			/listParticipants <event_ref_key> - List participants of an event
-			/blast <event_ref_key> - Send a message to all participants
+			/deleteEvent <Event_Reference_Code> - Delete an existing event
+			/listParticipants <Event_Reference_Code> - List participants of an event
+			/blast <Event_Reference_Code> - Send a message to all participants
 			/viewEvents - View all your events
 			/help - Show this help message`
 		case "/help":
@@ -67,13 +67,13 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			text = "Okay, let's add the date of the event. What's the date of the event?"
 			userState.State = model.StateAddingEventDate
 		case "/listParticipants":
-			text = "Okay, let's list the participants of an event. Please provide the Event Ref Key of the event."
+			text = "Okay, let's list the participants of an event. Please provide the Reference Code of the event."
 			userState.State = model.StateListParticipants
 		case "/deleteEvent":
-			text = "Okay, let's delete an event. Please provide the Event Ref Key of the event you want to delete."
+			text = "Okay, let's delete an event. Please provide the Reference Code of the event you want to delete."
 			userState.State = model.StateDeleteEvent
 		case "/blast":
-			text = "Okay, let's send a message to all participants. Please provide the Event Ref Key of the event."
+			text = "Okay, let's send a message to all participants. Please provide the Reference Code of the event."
 			userState.State = model.StateBlastMessage
 		case "/viewEvents":
 			events, err := o.FirebaseConnector.ListEventsByUserID(ctx, update.Message.From.ID)
@@ -85,7 +85,7 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			} else {
 				text = "Here are your events:\n"
 				for _, event := range events {
-					text += fmt.Sprintf("- %s (Ref Key: %s)\n", event.Name, event.ID)
+					text += fmt.Sprintf("- %s (Reference Code: %s)\n", event.Name, event.ID)
 					text += fmt.Sprintf("  Date: %s\n", event.EventDate.Format("2006-01-02"))
 					if len(event.EventDetails) > 0 {
 						text += "  Details:\n"
@@ -153,7 +153,7 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			userState.CurrentEvent.ID = refKey
 			err = o.FirebaseConnector.UpdateEvent(ctx, refKey, *userState.CurrentEvent)
 			if err != nil {
-				log.Println("error updating event with ref key:", err)
+				log.Println("error updating event with Reference Code:", err)
 				text = "Error updating event. Please try again."
 				userState.State = model.StateIdle
 				userState.CurrentEvent = nil
@@ -162,7 +162,7 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 
 			text = fmt.Sprintf("Event '%s' created successfully! Here are the details:\n", userState.CurrentEvent.Name)
 			text += fmt.Sprintf("EDM File ID: %s\n", userState.CurrentEvent.EDMFileID)
-			text += fmt.Sprintf("Event Ref Key: %s", userState.CurrentEvent.ID)
+			text += fmt.Sprintf("Event Reference Code: %s", userState.CurrentEvent.ID)
 			// Reset user state
 			userState.State = model.StateIdle
 			userState.CurrentEvent = &model.Event{}

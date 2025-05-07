@@ -96,13 +96,13 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 			userState.State = model.StateIdle
 			return
 		case "/joinEvent":
-			text = "Please provide the Event Ref Key of the event you want to join."
+			text = "Please provide the Event Reference Code of the event you want to join."
 			userState.State = model.StateJoinEvent
 		case "/notes":
-			text = `Please provide the Event Ref Key to view/add personal notes.`
+			text = `Please provide the Event Reference Code to view/add personal notes.`
 			userState.State = model.StatePersonalNotes
 		case "/checkIn":
-			text = "Please provide the Event Ref Key of the event you want to check in to."
+			text = "Please provide the Event Reference Code of the event you want to check in to."
 			userState.State = model.StateCheckIn
 		default:
 			text = "I didn't understand that command. Use /start or /help."
