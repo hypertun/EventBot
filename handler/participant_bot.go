@@ -6,14 +6,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
+	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/google/uuid"
 )
 
 type ParticipantBotHandler struct {
@@ -69,7 +75,6 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 			Keep track of your own notes and reminders for each event: /notes
 			Check in to an event: /checkIn
 
-
 			Easily check-in at events using a simple code
 			Access useful event details and FAQs
 			Keep track of your own notes and reminders for each event
@@ -81,19 +86,16 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 			/start – Start interacting with me and see a quick introduction.
 			/viewEvents – View your upcoming events and details.
 			/pastEvents – See events you've attended previously.
-			/joinEvent - Join an event.
+			/joinEvent - Join an event (you'll be prompted to answer any RSVP questions).
 			/help – Get a reminder of commands and how to use me.
 			/notes - Add or view personal notes for an event.
 			/checkIn - Check in to an event.
-
 			`
 		case "/viewEvents":
 			p.viewEventsHandler(ctx, false)
-			userState.State = model.StateIdle
 			return
 		case "/pastEvents":
 			p.viewEventsHandler(ctx, true)
-			userState.State = model.StateIdle
 			return
 		case "/joinEvent":
 			text = "Please provide the Event Reference Code of the event you want to join."
@@ -109,7 +111,6 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 		}
 	case model.StateJoinEvent:
 		p.handleJoinEvent(ctx)
-		userState.State = model.StateIdle
 		return
 	case model.StatePersonalNotes:
 		if userState.CurrentEvent == nil {
@@ -120,6 +121,83 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 		return
 	case model.StateCheckIn:
 		p.handleCheckIn(ctx)
+		return
+	case model.StateSelectEventForRSVP:
+		// Handle selecting which event to complete RSVP for from events list
+		if update.Message.Text == "0" {
+			_, err := p.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   "You need to complete the RSVP questions to fully join these events. Please use /viewEvents later to complete them.",
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			userState.TempOptions = nil
+			return
+		}
+
+		// If this is a yes/no response to a single event
+		if len(userState.TempOptions) == 1 && (strings.ToLower(update.Message.Text) == "yes" || strings.ToLower(update.Message.Text) == "no") {
+			if strings.ToLower(update.Message.Text) == "yes" {
+				// Start the RSVP questions flow immediately
+				p.askRSVPQuestion(ctx, userState)
+			} else {
+				_, err := p.bot.SendMessage(ctx, &bot.SendMessageParams{
+					ChatID: chatID,
+					Text:   "You need to complete the RSVP questions to fully join this event. Please use /viewEvents later to complete it.",
+				})
+				if err != nil {
+					log.Println("error sending message:", err)
+				}
+				userState.State = model.StateIdle
+				userState.CurrentEvent = nil
+				userState.TempOptions = nil
+			}
+			return
+		}
+
+		// Try to parse the number for multiple events
+		choiceNum, err := strconv.Atoi(update.Message.Text)
+		if err != nil || choiceNum < 1 || choiceNum > len(userState.TempOptions) {
+			_, err := p.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   fmt.Sprintf("Invalid selection. Please enter a number between 1 and %d, or '0' to skip for now.", len(userState.TempOptions)),
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			return
+		}
+
+		// Get the selected event
+		selectedEventID := userState.TempOptions[choiceNum-1]
+		event, err := p.FirebaseConnector.ReadEvent(ctx, selectedEventID)
+		if err != nil {
+			log.Println("error reading event:", err)
+			_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   "Error retrieving the event. Please try again later.",
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.TempOptions = nil
+			return
+		}
+
+		// Set up for answering RSVP questions
+		userState.CurrentEvent = event
+		userState.RSVPQuestionIndex = 0
+		userState.TempOptions = nil
+
+		// Start asking RSVP questions
+		p.askRSVPQuestion(ctx, userState)
+		return
+	case model.StateAnsweringRSVPQuestion:
+		p.handleRSVPQuestionAnswer(ctx)
 		return
 	default:
 		text = "An error occurred."
@@ -135,6 +213,314 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 	if err != nil {
 		log.Println("error sending message:", err)
 	}
+}
+
+// Helper function to download an image, send it, and delete it
+func downloadSendAndDeleteImage(ctx context.Context, b *bot.Bot, chatID int64, imageURL string, caption string) error {
+	// Create temporary directory if it doesn't exist
+	tempDir := "./temp_images"
+	err := os.MkdirAll(tempDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	// Generate a unique filename to avoid conflicts
+	uniqueID := uuid.NewString()
+	tempFilePath := filepath.Join(tempDir, uniqueID+".jpg")
+
+	// Download the file
+	err = downloadFile(imageURL, tempFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to download image: %w", err)
+	}
+
+	// Ensure we delete the file when done
+	defer os.Remove(tempFilePath)
+
+	// Open the file for reading
+	file, err := os.Open(tempFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to open downloaded file: %w", err)
+	}
+	defer file.Close()
+
+	// Send the photo using the file
+	_, err = b.SendPhoto(ctx, &bot.SendPhotoParams{
+		ChatID:  chatID,
+		Photo:   &models.InputFileUpload{Filename: "image.jpg", Data: file},
+		Caption: caption,
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to send photo: %w", err)
+	}
+
+	return nil
+}
+
+// Helper function to download a file from URL
+func downloadFile(url string, filepath string) error {
+	// Create an HTTP client with timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	// Make the HTTP request
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Check if the response was successful
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad status: %s", resp.Status)
+	}
+
+	// Create the file
+	out, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	// Write the response body to file
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+func (p *ParticipantBotHandler) askRSVPQuestion(ctx context.Context, userState *model.UserState) {
+	// Check if we've gone through all questions
+	if userState.RSVPQuestionIndex >= len(userState.CurrentEvent.RSVPQuestions) {
+		// Save the participant's answers
+		p.saveRSVPAnswers(ctx, userState)
+		return
+	}
+
+	// Get the current question
+	question := userState.CurrentEvent.RSVPQuestions[userState.RSVPQuestionIndex]
+
+	// Prepare the message text
+	text := fmt.Sprintf("Question %d/%d: %s",
+		userState.RSVPQuestionIndex+1,
+		len(userState.CurrentEvent.RSVPQuestions),
+		question.Question)
+
+	// Create the appropriate reply markup based on question type
+	var replyMarkup interface{}
+
+	switch question.Type {
+	case model.QuestionTypeYesNo:
+		// Create a keyboard with Yes/No options
+		keyboard := [][]models.KeyboardButton{
+			{
+				{Text: "Yes"},
+				{Text: "No"},
+			},
+		}
+		replyMarkup = &models.ReplyKeyboardMarkup{
+			Keyboard:        keyboard,
+			OneTimeKeyboard: true,
+			ResizeKeyboard:  true,
+		}
+
+	case model.QuestionTypeMCQ:
+		// Create a keyboard with MCQ options
+		var rows [][]models.KeyboardButton
+		for _, option := range question.Options {
+			rows = append(rows, []models.KeyboardButton{{Text: option}})
+		}
+		replyMarkup = &models.ReplyKeyboardMarkup{
+			Keyboard:        rows,
+			OneTimeKeyboard: true,
+			ResizeKeyboard:  true,
+		}
+
+	case model.QuestionTypeMultiSelect:
+		// For multi-select, we'll handle this differently
+		text += "\nSelect multiple options by sending them as a comma-separated list (e.g., 'Option 1, Option 3').\nAvailable options:\n"
+		for i, option := range question.Options {
+			text += fmt.Sprintf("%d. %s\n", i+1, option)
+		}
+
+	case model.QuestionTypeShortAnswer:
+		// For short answer, just prompt for free text
+		text += "\nPlease provide your answer as free text."
+	}
+
+	// Send the question text first
+	params := &bot.SendMessageParams{
+		ChatID: p.update.Message.Chat.ID,
+		Text:   text,
+	}
+
+	if replyMarkup != nil {
+		params.ReplyMarkup = replyMarkup
+	}
+
+	_, err := p.bot.SendMessage(ctx, params)
+	if err != nil {
+		log.Println("error sending message:", err)
+	}
+
+	// If there's an image URL, download and send it
+	if question.ImageFileURL != "" && question.ImageFileURL != "N/A" {
+		log.Printf("Attempting to download and send image: %s", question.ImageFileURL)
+
+		err := downloadSendAndDeleteImage(
+			ctx,
+			p.bot,
+			p.update.Message.Chat.ID,
+			question.ImageFileURL,
+			"Image for question "+strconv.Itoa(userState.RSVPQuestionIndex+1),
+		)
+
+		if err != nil {
+			log.Printf("Failed to send image: %v", err)
+
+			// Fall back to a reliable image if the download/send fails
+			fallbackURL := "https://upload.wikimedia.org/wikipedia/commons/thumb/8/83/Telegram_2019_Logo.svg/512px-Telegram_2019_Logo.svg.png"
+
+			err = downloadSendAndDeleteImage(
+				ctx,
+				p.bot,
+				p.update.Message.Chat.ID,
+				fallbackURL,
+				"Image for question "+strconv.Itoa(userState.RSVPQuestionIndex+1)+" (fallback)",
+			)
+
+			if err != nil {
+				log.Printf("Failed to send fallback image: %v", err)
+
+				// Last resort - notify the user
+				_, _ = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+					ChatID: p.update.Message.Chat.ID,
+					Text:   "Note: There is an image for this question that couldn't be displayed.",
+				})
+			}
+		}
+	}
+
+	userState.State = model.StateAnsweringRSVPQuestion
+}
+
+func (p *ParticipantBotHandler) handleRSVPQuestionAnswer(ctx context.Context) {
+	userID := p.update.Message.From.ID
+	userState := userPBotStates[userID]
+
+	// Get the current question
+	question := userState.CurrentEvent.RSVPQuestions[userState.RSVPQuestionIndex]
+
+	// Process the answer based on question type
+	var answers []string
+
+	switch question.Type {
+	case model.QuestionTypeYesNo, model.QuestionTypeMCQ:
+		// Single selection
+		answers = []string{p.update.Message.Text}
+
+	case model.QuestionTypeMultiSelect:
+		// Multiple selection
+		options := strings.Split(p.update.Message.Text, ",")
+		for _, option := range options {
+			answers = append(answers, strings.TrimSpace(option))
+		}
+
+	case model.QuestionTypeShortAnswer:
+		// Short answer
+		answers = []string{p.update.Message.Text}
+	}
+
+	// Store the answer in the user state
+	if userState.CurrentEvent.ID != "" && question.ID != "" {
+		// Create or update the RSVP answer
+		participant, err := p.FirebaseConnector.ReadParticipantByUserID(ctx, userID)
+		if err != nil || participant == nil {
+			log.Println("error reading participant:", err)
+			_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: p.update.Message.Chat.ID,
+				Text:   "Error retrieving your details. Please try again.",
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			return
+		}
+
+		// Find the user's sign-up for this event
+		var signedUpEvent *model.SignedUpEvent
+		var eventIndex int
+		for i := range participant.SignedUpEvents {
+			if participant.SignedUpEvents[i].EventID == userState.CurrentEvent.ID {
+				signedUpEvent = &participant.SignedUpEvents[i]
+				eventIndex = i
+				break
+			}
+		}
+
+		if signedUpEvent != nil {
+			// Check if this question has already been answered
+			var answered bool
+			for i, rsvpAnswer := range signedUpEvent.RSVPAnswers {
+				if rsvpAnswer.QuestionID == question.ID {
+					// Update the existing answer
+					signedUpEvent.RSVPAnswers[i].Answers = answers
+					answered = true
+					break
+				}
+			}
+
+			if !answered {
+				// Add a new answer
+				signedUpEvent.RSVPAnswers = append(signedUpEvent.RSVPAnswers, model.RSVPAnswer{
+					QuestionID: question.ID,
+					Answers:    answers,
+				})
+			}
+
+			// Update the user's sign-up event
+			participant.SignedUpEvents[eventIndex] = *signedUpEvent
+
+			// Save back to Firebase
+			err = p.FirebaseConnector.UpdateParticipant(ctx, *participant)
+			if err != nil {
+				log.Println("error updating participant:", err)
+			}
+		}
+	}
+
+	// Move to the next question
+	userState.RSVPQuestionIndex++
+
+	// Send a positive acknowledgment
+	_, err := p.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      p.update.Message.Chat.ID,
+		Text:        "Answer recorded!",
+		ReplyMarkup: &models.ReplyKeyboardRemove{RemoveKeyboard: true},
+	})
+	if err != nil {
+		log.Println("error sending message:", err)
+	}
+
+	// Ask the next question or finish
+	p.askRSVPQuestion(ctx, userState)
+}
+
+func (p *ParticipantBotHandler) saveRSVPAnswers(ctx context.Context, userState *model.UserState) {
+	// This function is called when all questions have been answered
+	_, err := p.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      p.update.Message.Chat.ID,
+		Text:        "Thank you for completing the RSVP questions! Your event registration is now complete.",
+		ReplyMarkup: &models.ReplyKeyboardRemove{RemoveKeyboard: true},
+	})
+	if err != nil {
+		log.Println("error sending message:", err)
+	}
+
+	// Reset the state
+	userState.State = model.StateIdle
+	userState.CurrentEvent = nil
+	userState.RSVPQuestionIndex = 0
 }
 
 func (p *ParticipantBotHandler) handleCheckIn(ctx context.Context) {
@@ -431,13 +817,27 @@ func (p *ParticipantBotHandler) handleJoinEvent(ctx context.Context) {
 	userID := p.update.Message.From.ID
 	eventID := p.update.Message.Text
 
+	// Get event details first to check if RSVP questions exist
+	event, err := p.FirebaseConnector.ReadEvent(ctx, eventID)
+	if err != nil {
+		log.Println("error reading event:", err)
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: userID,
+			Text:   fmt.Sprintf("Error finding event with ID '%s'. Please check the ID and try again.", eventID),
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
+	}
+
 	participant := &model.Participant{
 		UserID: userID,
 		Name:   p.update.Message.From.FirstName,
 		Code:   strconv.Itoa(rand.Intn(900000) + 100000),
 	}
 
-	err := p.FirebaseConnector.CreateParticipant(ctx, eventID, participant)
+	err = p.FirebaseConnector.CreateParticipant(ctx, eventID, participant)
 	if err != nil {
 		log.Println("error creating participant:", err)
 		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
@@ -450,14 +850,64 @@ func (p *ParticipantBotHandler) handleJoinEvent(ctx context.Context) {
 		return
 	}
 
+	if event.EDMFileURL != "" && event.EDMFileURL != "N/A" {
+		log.Printf("Attempting to download and send EDM image: %s", event.EDMFileURL)
+
+		err := downloadSendAndDeleteImage(
+			ctx,
+			p.bot,
+			userID,
+			event.EDMFileURL,
+			fmt.Sprintf("Event: %s", event.Name),
+		)
+
+		if err != nil {
+			log.Printf("Failed to send EDM image: %v", err)
+
+			// Send a message without image if failed
+			_, _ = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: userID,
+				Text:   fmt.Sprintf("Event: %s (image unavailable)", event.Name),
+			})
+		}
+	}
+
+	// Then send the confirmation message
+	joinMessage := fmt.Sprintf(`You have successfully joined event '%s'!
+This is your checkIn code: %s`, event.Name, participant.Code)
+
 	_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: userID,
-		Text: fmt.Sprintf(`You have successfully joined event '%s'!
-This is you checkIn code: %s
-		`, eventID, participant.Code),
+		Text:   joinMessage,
 	})
 	if err != nil {
 		log.Println("error sending message:", err)
+	}
+
+	// If the event has RSVP questions, start the RSVP flow immediately
+	if event != nil && len(event.RSVPQuestions) > 0 {
+		time.Sleep(1 * time.Second) // Small delay for better UX
+
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: userID,
+			Text:   "This event requires you to answer some RSVP questions. Let's go through them now.",
+		})
+		if err != nil {
+			log.Println("error sending RSVP prompt:", err)
+		}
+
+		// Set up state for answering RSVP
+		userState := userPBotStates[userID]
+		userState.CurrentEvent = event
+		userState.RSVPQuestionIndex = 0
+		userState.State = model.StateAnsweringRSVPQuestion
+
+		// Start asking RSVP questions immediately
+		p.askRSVPQuestion(ctx, userState)
+	} else {
+		// No RSVP questions, joining is complete
+		userState := userPBotStates[userID]
+		userState.State = model.StateIdle
 	}
 }
 
@@ -485,6 +935,9 @@ func (p *ParticipantBotHandler) viewEventsHandler(ctx context.Context, past bool
 	}
 
 	var eventsToShow []model.Event
+	var incompleteEvents []model.Event
+	participant, _ := p.FirebaseConnector.ReadParticipantByUserID(ctx, p.update.Message.From.ID)
+
 	for i := range allEvents {
 		event, err := p.FirebaseConnector.ReadEvent(ctx, allEvents[i].ID)
 		if err != nil {
@@ -495,12 +948,38 @@ func (p *ParticipantBotHandler) viewEventsHandler(ctx context.Context, past bool
 			if event.EventDate.After(time.Now()) {
 				continue
 			}
+		} else {
+			if event.EventDate.Before(time.Now()) {
+				continue
+			}
 		}
+
+		// Check if this event has unanswered RSVP questions
+		if len(event.RSVPQuestions) > 0 && participant != nil && !past {
+			hasAnsweredAll := false
+
+			// Find the user's sign-up for this event
+			for _, signedUpEvent := range participant.SignedUpEvents {
+				if signedUpEvent.EventID == event.ID {
+					if len(signedUpEvent.RSVPAnswers) == len(event.RSVPQuestions) {
+						hasAnsweredAll = true
+					}
+					break
+				}
+			}
+
+			if !hasAnsweredAll {
+				incompleteEvents = append(incompleteEvents, *event)
+				continue // Don't add to regular events list
+			}
+		}
+
 		eventsToShow = append(eventsToShow, *event)
 	}
 
-	if len(eventsToShow) == 0 {
-		text := "You have no upcoming for any events."
+	// If we only have incomplete events with RSVP questions, handle that case
+	if len(eventsToShow) == 0 && len(incompleteEvents) == 0 {
+		text := "You have no upcoming events."
 		if past {
 			text = "You have no past events."
 		}
@@ -514,21 +993,50 @@ func (p *ParticipantBotHandler) viewEventsHandler(ctx context.Context, past bool
 		return
 	}
 
+	// Sort events by date
 	sort.Slice(eventsToShow, func(i, j int) bool {
 		return eventsToShow[i].EventDate.After(eventsToShow[j].EventDate)
 	})
 
+	sort.Slice(incompleteEvents, func(i, j int) bool {
+		return incompleteEvents[i].EventDate.After(incompleteEvents[j].EventDate)
+	})
+
 	var messageText string
-	messageText = "Here are the events you are signed up for:\n"
-	for _, event := range eventsToShow {
-		messageText += fmt.Sprintf("- %s (Event ID: %s)\n",
-			event.Name, event.ID)
-		messageText += fmt.Sprintf("  Date: %s\n", event.EventDate.Format("2006-01-02"))
-		if len(event.EventDetails) > 0 {
-			messageText += "  Details:\n"
-			for _, detail := range event.EventDetails {
-				messageText += fmt.Sprintf("    - Q: %s\n", detail.Question)
-				messageText += fmt.Sprintf("      A: %s\n", detail.Answer)
+	var pendingRSVPEventsIDs []string
+
+	// First, show incomplete events that need RSVP
+	if len(incompleteEvents) > 0 {
+		messageText = "⚠️ Events requiring RSVP completion:\n"
+		for _, event := range incompleteEvents {
+			messageText += fmt.Sprintf("- %s (Event ID: %s)\n",
+				event.Name, event.ID)
+			messageText += fmt.Sprintf("  Date: %s\n", event.EventDate.Format("2006-01-02"))
+			messageText += "  ⚠️ You must complete the RSVP to fully join this event.\n"
+			pendingRSVPEventsIDs = append(pendingRSVPEventsIDs, event.ID)
+		}
+
+		messageText += "\n"
+	}
+
+	// Then show complete/normal events
+	if len(eventsToShow) > 0 {
+		if messageText == "" {
+			messageText = "Here are the events you are signed up for:\n"
+		} else {
+			messageText += "Completed Events:\n"
+		}
+
+		for _, event := range eventsToShow {
+			messageText += fmt.Sprintf("- %s (Event ID: %s)\n",
+				event.Name, event.ID)
+			messageText += fmt.Sprintf("  Date: %s\n", event.EventDate.Format("2006-01-02"))
+			if len(event.EventDetails) > 0 {
+				messageText += "  Details:\n"
+				for _, detail := range event.EventDetails {
+					messageText += fmt.Sprintf("    - Q: %s\n", detail.Question)
+					messageText += fmt.Sprintf("      A: %s\n", detail.Answer)
+				}
 			}
 		}
 	}
@@ -540,210 +1048,49 @@ func (p *ParticipantBotHandler) viewEventsHandler(ctx context.Context, past bool
 	if err != nil {
 		log.Println("error sending message:", err)
 	}
+
+	// If there are pending RSVP events, ask the user to complete them
+	if len(pendingRSVPEventsIDs) > 0 && !past {
+		time.Sleep(1 * time.Second) // Small delay
+
+		if len(pendingRSVPEventsIDs) == 1 {
+			// Only one event has pending RSVP
+			_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: p.update.Message.Chat.ID,
+				Text:   fmt.Sprintf("You have incomplete RSVP questions for event ID: %s. Would you like to complete them now? (yes/no)", pendingRSVPEventsIDs[0]),
+			})
+
+			userState := userPBotStates[p.update.Message.From.ID]
+			event, _ := p.FirebaseConnector.ReadEvent(ctx, pendingRSVPEventsIDs[0])
+			userState.CurrentEvent = event
+			userState.RSVPQuestionIndex = 0
+			userState.State = model.StateSelectEventForRSVP
+			userState.TempOptions = pendingRSVPEventsIDs
+		} else {
+			// Multiple events have pending RSVP
+			pendingText := "You have incomplete RSVP questions for these events:\n"
+			for i, eventID := range pendingRSVPEventsIDs {
+				event, _ := p.FirebaseConnector.ReadEvent(ctx, eventID)
+				if event != nil {
+					pendingText += fmt.Sprintf("%d. %s (Event ID: %s)\n", i+1, event.Name, eventID)
+				} else {
+					pendingText += fmt.Sprintf("%d. Event ID: %s\n", i+1, eventID)
+				}
+			}
+			pendingText += "\nPlease enter the number of the event you'd like to complete RSVP questions for, or '0' to skip."
+
+			_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: p.update.Message.Chat.ID,
+				Text:   pendingText,
+			})
+
+			userState := userPBotStates[p.update.Message.From.ID]
+			userState.TempOptions = pendingRSVPEventsIDs
+			userState.State = model.StateSelectEventForRSVP
+		}
+
+		if err != nil {
+			log.Println("error sending RSVP prompt:", err)
+		}
+	}
 }
-
-// // checkInCallbackHandler is triggered when a user taps the "Check In" button
-// // in the event details inline keyboard.
-// func checkInCallbackHandler(ctx context.Context, b *bot.Bot, mes models.MaybeInaccessibleMessage, data []byte) {
-// 	// We expect callback data in the form "checkIn_{index}".
-// 	var index int
-// 	_, err := fmt.Sscanf(string(data), "checkIn_%d", &index)
-// 	if err != nil {
-// 		log.Println("error parsing check-in callback index:", err)
-// 		return
-// 	}
-// 	// In showEventDetails we already set the current event in chat state.
-// 	checkInHandler(ctx, b, mes.Message.Chat.ID)
-// }
-
-// // checkInHandler verifies that a current event is selected (via showEventDetails)
-// // and then prompts the user to enter the 6‑digit check‑in code.
-// func checkInHandler(ctx context.Context, b *bot.Bot, chatID int64) {
-// 	cs, ok := chatStates[chatID]
-// 	if !ok || cs.CurrentEvent.Name == "" {
-// 		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 			ChatID: chatID,
-// 			Text:   "No event selected. Please use /viewEvents to select an event first.",
-// 		})
-// 		if err != nil {
-// 			log.Println("error sending no event message:", err)
-// 		}
-// 		return
-// 	}
-// 	// Set state to check-in.
-// 	cs.State = StateCheckIn
-// 	prompt := fmt.Sprintf("Please enter a 6 digit code for %s", cs.CurrentEvent.Name)
-// 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 		ChatID: chatID,
-// 		Text:   prompt,
-// 	})
-// 	if err != nil {
-// 		log.Println("error sending check-in prompt:", err)
-// 	}
-// }
-
-// // handleCheckInReply processes the user's reply containing the check‑in code.
-// func handleCheckInReply(ctx context.Context, b *bot.Bot, update *models.Update) {
-// 	chatID := update.Message.Chat.ID
-// 	cs, ok := chatStates[chatID]
-// 	if !ok || cs.State != StateCheckIn {
-// 		// Not in check-in mode; ignore.
-// 		return
-// 	}
-// 	code := update.Message.Text
-// 	if code != "123456" {
-// 		// Create an inline keyboard with two buttons.
-// 		kb := inline.New(b)
-// 		kb.Row().Button("Try Again", []byte("try_again_checkin"), tryAgainCheckInCallbackHandler)
-// 		kb.Row().Button("Cancel", []byte("cancel_checkin"), cancelCheckInCallbackHandler)
-// 		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 			ChatID:      chatID,
-// 			Text:        fmt.Sprintf("Incorrect code. Check in failed. Please try again by entering the correct 6 digit code for %s", cs.CurrentEvent.Name),
-// 			ReplyMarkup: kb,
-// 		})
-// 		if err != nil {
-// 			log.Println("error sending check-in failure message:", err)
-// 		}
-// 		// Do not reset state so the user remains in check-in mode.
-// 		return
-// 	}
-// 	// Successful check-in.
-// 	username := update.Message.From.Username
-// 	if username == "" {
-// 		username = update.Message.From.FirstName
-// 	}
-// 	successMsg := fmt.Sprintf("Thank you %s, check in to %s is successful. Enjoy your time here!", username, cs.CurrentEvent.Name)
-// 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 		ChatID: chatID,
-// 		Text:   successMsg,
-// 	})
-// 	if err != nil {
-// 		log.Println("error sending check-in success message:", err)
-// 	}
-// 	cs.State = StateIdle
-// }
-
-// // tryAgainCheckInCallbackHandler re-prompts the user for the check-in code.
-// func tryAgainCheckInCallbackHandler(ctx context.Context, b *bot.Bot, mes models.MaybeInaccessibleMessage, data []byte) {
-// 	chatID := mes.Message.Chat.ID
-// 	cs, ok := chatStates[chatID]
-// 	if !ok || cs.State != StateCheckIn {
-// 		return
-// 	}
-// 	prompt := fmt.Sprintf("Please enter a 6 digit code for %s", cs.CurrentEvent.Name)
-// 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 		ChatID: chatID,
-// 		Text:   prompt,
-// 	})
-// 	if err != nil {
-// 		log.Println("error sending try again check-in prompt:", err)
-// 	}
-// }
-
-// // cancelCheckInCallbackHandler resets the state and returns the user to the events list.
-// func cancelCheckInCallbackHandler(ctx context.Context, b *bot.Bot, mes models.MaybeInaccessibleMessage, data []byte) {
-// 	chatID := mes.Message.Chat.ID
-// 	if cs, ok := chatStates[chatID]; ok {
-// 		cs.State = StateIdle
-// 	}
-// 	// Return to the events list.
-// 	viewEventsHandler(ctx, b, &models.Update{Message: mes.Message})
-// }
-
-// // viewEventsKeyboardSelect handles event selection callbacks.
-// func viewEventsKeyboardSelect(ctx context.Context, b *bot.Bot, mes models.MaybeInaccessibleMessage, data []byte) {
-// 	cmd := string(data)
-// 	if cmd == "cancel" {
-// 		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 			ChatID: mes.Message.Chat.ID,
-// 			Text:   "Operation cancelled. You can view events using /viewEvents.",
-// 		})
-// 		if err != nil {
-// 			log.Println("error sending cancel message:", err)
-// 		}
-// 		return
-// 	}
-// 	var index int
-// 	_, err := fmt.Sscanf(cmd, "viewEvent_%d", &index)
-// 	if err != nil {
-// 		log.Println("error parsing event index:", err)
-// 		return
-// 	}
-// 	showEventDetails(ctx, b, mes.Message.Chat.ID, index)
-// }
-
-// showEventDetails displays details of the selected event.
-// It also updates the chat's current event and adds an inline keyboard
-// that includes a "Check In" button.
-// func showEventDetails(ctx context.Context, b *bot.Bot, chatID int64, index int) {
-// 	if index < 0 || index >= len(events) {
-// 		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 			ChatID: chatID,
-// 			Text:   "Invalid event selected.",
-// 		})
-// 		if err != nil {
-// 			log.Println("error sending message:", err)
-// 		}
-// 		return
-// 	}
-// 	event := events[index]
-
-// 	// Update the chat state with the current event.
-// 	cs, ok := chatStates[chatID]
-// 	if !ok {
-// 		cs = &ChatState{State: StateIdle}
-// 		chatStates[chatID] = cs
-// 	}
-// 	cs.CurrentEvent = event
-
-// 	detailsText := fmt.Sprintf(
-// 		"Event Details:\n\nTitle: %s\nDate & Time: %s\nLocation: %s\n\nDescription: %s",
-// 		event.Name,
-// 		event.Date,
-// 		event.Location,
-// 		event.Description,
-// 	)
-// 	kb := inline.New(b)
-// 	// Add buttons for FAQ and Personal Notes (existing flow)
-// 	kb.Row().Button("FAQ", []byte(fmt.Sprintf("faq_%d", index)), faqCallbackHandler)
-
-// 	parsedTime, err := time.Parse("2006-01-02 15:04", event.Date)
-// 	if err != nil {
-// 		log.Println("error parsing event date:", err)
-// 		// Handle error (perhaps assume event is not in the past)
-// 	}
-// 	var isEventInThePast = parsedTime.Before(time.Now())
-
-// 	if !isEventInThePast {
-// 		// NEW: Add Check In button specific to this event.
-// 		kb.Button("Check In", []byte(fmt.Sprintf("checkIn_%d", index)), checkInCallbackHandler)
-// 	}
-// 	// Print boolean and string using fmt.Printf
-// 	fmt.Printf("Boolean: %t, String: %s\n", isEventInThePast, event.Date)
-
-// 	kb.Row().Button("Add Own Notes for Reference", []byte(fmt.Sprintf("notes_%d", index)), personalNotesCallbackHandler)
-
-// 	// Back button to return to the events list.
-// 	kb.Row().Button("Back", []byte(fmt.Sprintf("back_%d", index)), backToEventsCallbackHandler)
-// 	// Send event details (with photo if available)
-// 	if event.MediaImage != "" {
-// 		_, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
-// 			ChatID:      chatID,
-// 			Photo:       &models.InputFileString{Data: event.MediaImage},
-// 			Caption:     detailsText,
-// 			ReplyMarkup: kb,
-// 		})
-// 		if err != nil {
-// 			log.Println("error sending photo with details:", err)
-// 		}
-// 	} else {
-// 		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-// 			ChatID:      chatID,
-// 			Text:        detailsText,
-// 			ReplyMarkup: kb,
-// 		})
-// 		if err != nil {
-// 			log.Println("error sending event details:", err)
-// 		}
-// 	}
-// }

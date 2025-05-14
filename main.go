@@ -40,6 +40,7 @@ func main() {
 
 	organiserBotHandler := handler.NewOrganiserBotHandler(
 		*firebaseConnector,
+		organiserBotToken,
 	)
 
 	participantBotHandler := handler.NewParticipantBotHandler(

@@ -2,19 +2,46 @@ package model
 
 import "time"
 
+// QuestionType defines the type of question for RSVP
+type QuestionType int
+
+const (
+	// RSVP Question Types
+	QuestionTypeYesNo QuestionType = iota
+	QuestionTypeMCQ
+	QuestionTypeMultiSelect
+	QuestionTypeShortAnswer
+)
+
 type Event struct {
-	ID           string    `firestore:"id"`
-	UserID       int64     `firestore:"userid"`
-	Name         string    `firestore:"name"`
-	EDMFileID    string    `firestore:"edmFileID"`
-	EventDate    time.Time `firestore:"eventDate"`
-	EventDetails []QnA     `firestore:"eventDetails"`
-	Participants []string  `firestore:"participants"` //list of participants by id
+	ID            string         `firestore:"id"`
+	UserID        int64          `firestore:"userid"`
+	Name          string         `firestore:"name"`
+	EDMFileID     string         `firestore:"edmFileID"`
+	EDMFileURL    string         `firestore:"edmFileURL"`
+	EventDate     time.Time      `firestore:"eventDate"`
+	EventDetails  []QnA          `firestore:"eventDetails"`
+	RSVPQuestions []RSVPQuestion `firestore:"rsvpQuestions"`
+	Participants  []string       `firestore:"participants"` //list of participants by id
 }
 
 type QnA struct {
 	Question string
 	Answer   string
+}
+
+type RSVPQuestion struct {
+	ID           string       `firestore:"id"`
+	Question     string       `firestore:"question"`
+	Type         QuestionType `firestore:"type"`
+	Options      []string     `firestore:"options"`      // Used for MCQ and MultiSelect
+	ImageFileID  string       `firestore:"imageFileID"`  // Optional image for the question
+	ImageFileURL string       `firestore:"imageFileURL"` // URL to access the image
+}
+
+type RSVPAnswer struct {
+	QuestionID string   `firestore:"questionID"`
+	Answers    []string `firestore:"answers"` // Can be multiple for MultiSelect
 }
 
 type Participant struct {
@@ -27,9 +54,10 @@ type Participant struct {
 }
 
 type SignedUpEvent struct {
-	EventID       string `firestore:"eventID"`
-	PersonalNotes string `firestore:"personalNotes"`
-	CheckedIn     bool   `firestore:"checkedIn"`
+	EventID       string       `firestore:"eventID"`
+	PersonalNotes string       `firestore:"personalNotes"`
+	CheckedIn     bool         `firestore:"checkedIn"`
+	RSVPAnswers   []RSVPAnswer `firestore:"rsvpAnswers"`
 }
 
 const (
@@ -44,8 +72,18 @@ const (
 	StateBlastMessage
 	StateAddingEventDetailsAnswer
 
+	// New RSVP states for organiser
+	StateAddingRSVP
+	StateAddingRSVPQuestion
+	StateSelectingRSVPType
+	StateAddingRSVPOptions
+	StateAddingRSVPImage
+	StateConfirmRSVPQuestion
+
 	//Participant Bot
 	StateCheckIn
 	StatePersonalNotes
 	StateJoinEvent
+	StateAnsweringRSVPQuestion
+	StateSelectEventForRSVP
 )
