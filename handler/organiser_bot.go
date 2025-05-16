@@ -66,20 +66,101 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			/viewEvents - View all your events
 			/setCheckInCode <Event_Reference_Code> - Set or update the check-in code for an event
 			/help - Show this help message`
+
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getOrganizerMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			return
+
 		case "/help":
-			text = "I'm your EventBot. I can help you manage events. Use /addEvent to start creating an event with details and RSVP questions, or /deleteEvent to delete an existing event."
+			text = "I'm your EventBot. I can help you manage events. Use the buttons below or type commands to manage your events."
+
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getOrganizerMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			return
 		case "/setCheckInCode":
 			text = "Please provide the Reference Code of the event you want to set a check-in code for."
 			userState.State = model.StateSettingEventCheckInCode
 		case "/addEvent":
 			text = "Okay, let's create a new event. What's the name of the event?"
+
+			// Add a Cancel button
+			params = &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   text,
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: true,
+				},
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
 			userState.State = model.StateAddingEventName
+			return
 		case "/addEventDate":
 			text = "Okay, let's add the date of the event. What's the date of the event?"
 			userState.State = model.StateAddingEventDate
 		case "/listParticipants":
 			text = "Okay, let's list the participants of an event. Please provide the Reference Code of the event."
+
+			params = &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   text,
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: true,
+				},
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
 			userState.State = model.StateListParticipants
+			return
+		case "Cancel":
+			text = "Operation cancelled. What would you like to do next?"
+
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getOrganizerMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			userState.LastQuestion = ""
+			userState.CurrentRSVPQuestion = nil
+			userState.RSVPQuestionIndex = 0
+			userState.TempOptions = nil
+			return
 		case "/deleteEvent":
 			text = "Okay, let's delete an event. Please provide the Reference Code of the event you want to delete."
 			userState.State = model.StateDeleteEvent
@@ -136,13 +217,65 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			text = "I didn't understand that command. Use /start or /help."
 		}
 	case model.StateAddingEventName:
+		if update.Message.Text == "Cancel" {
+			text = "Event creation cancelled. What would you like to do next?"
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getOrganizerMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			return
+		}
+
 		userState.CurrentEvent = &model.Event{
 			Name:   update.Message.Text,
 			UserID: update.Message.From.ID,
 		}
 		text = "Great! Now, please send me the date of the event in this format: 'YYYY-MM-DD'."
+
+		// Add a Cancel button
+		params = &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   text,
+			ReplyMarkup: &models.ReplyKeyboardMarkup{
+				Keyboard: [][]models.KeyboardButton{
+					{
+						{Text: "Cancel"},
+					},
+				},
+				ResizeKeyboard:  true,
+				OneTimeKeyboard: true,
+			},
+		}
+		_, err := b.SendMessage(ctx, params)
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
 		userState.State = model.StateAddingEventDate
+		return
 	case model.StateAddingEventDate:
+		if update.Message.Text == "Cancel" {
+			text = "Event creation cancelled. What would you like to do next?"
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getOrganizerMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			return
+		}
+
 		// Validate the date format
 		eventDate, err := time.Parse("2006-01-02", update.Message.Text)
 		if err != nil || eventDate.Before(time.Now()) {
@@ -150,6 +283,15 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			params = &bot.SendMessageParams{
 				ChatID: chatID,
 				Text:   text,
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: true,
+				},
 			}
 			_, err := b.SendMessage(ctx, params)
 			if err != nil {
@@ -160,23 +302,121 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			// Date format is correct, store it and move to the next state
 			userState.CurrentEvent.EventDate = eventDate
 			text = "Great! Now, please send me the EDM for the event."
+
+			// Add a Cancel button
+			params = &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   text,
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: true,
+				},
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
 			userState.State = model.StateAddingEventPicture
+			return
 		}
 	case model.StateAddingEventPicture:
+		if update.Message.Text == "Cancel" {
+			text = "Event creation cancelled. What would you like to do next?"
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getOrganizerMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			return
+		}
+
 		if update.Message.Photo != nil {
 			// Get the largest photo
 			largestPhoto := update.Message.Photo[len(update.Message.Photo)-1]
 			userState.CurrentEvent.EDMFileID = largestPhoto.FileID
 			text = "Got it! Now, let's add some event details. Send me a question, and I'll ask for the answer. Send 'done' when you're finished."
+
+			// Add cancel and done options
+			params = &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   text,
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "done"},
+						},
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: false,
+				},
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
 			userState.State = model.StateAddingEventDetails
+			return
 		} else {
-			text = "Please send a picture file."
+			text = "Please send a picture file or type 'Cancel' to abort event creation."
 		}
 	case model.StateAddingEventDetails:
+		if update.Message.Text == "Cancel" {
+			text = "Event creation cancelled. What would you like to do next?"
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getOrganizerMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			return
+		}
+
 		if strings.ToLower(update.Message.Text) == "done" {
 			// Move to adding RSVP questions
 			text = "Now, let's add RSVP questions for your participants. These will be required when participants join your event.\n\nPlease enter your first RSVP question or 'skip' if you don't want to add any RSVP questions."
+
+			// Add skip and cancel options
+			params = &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   text,
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "skip"},
+						},
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: true,
+				},
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
 			userState.State = model.StateAddingRSVPQuestion
+			return
 		} else {
 			// Store the question and ask if they want to add an image
 			question := update.Message.Text
@@ -187,6 +427,9 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 				{
 					{Text: "Yes, add an image"},
 					{Text: "No, continue without image"},
+				},
+				{
+					{Text: "Cancel"},
 				},
 			}
 
@@ -212,13 +455,35 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 
 	// Add a new state for handling image decisions for event details
 	case model.StateAddingEventDetailsImage:
+		if update.Message.Text == "Cancel" {
+			text = "Event creation cancelled. What would you like to do next?"
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getOrganizerMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			return
+		}
+
 		if update.Message.Text == "Yes, add an image" {
 			// Ask user to send the image
 			params = &bot.SendMessageParams{
 				ChatID: chatID,
 				Text:   "Please send the image for this question.",
-				ReplyMarkup: &models.ReplyKeyboardRemove{
-					RemoveKeyboard: true,
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: true,
 				},
 			}
 			_, err := b.SendMessage(ctx, params)
@@ -232,8 +497,14 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			params = &bot.SendMessageParams{
 				ChatID: chatID,
 				Text:   fmt.Sprintf("What's the answer to '%s'?", userState.LastQuestion),
-				ReplyMarkup: &models.ReplyKeyboardRemove{
-					RemoveKeyboard: true,
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: true,
 				},
 			}
 			_, err := b.SendMessage(ctx, params)
@@ -248,6 +519,23 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 
 	// Add a new state for handling image uploads for event details
 	case model.StateAddingEventDetailsImageUpload:
+		// If the user types "Cancel", abort the event creation
+		if update.Message.Text == "Cancel" {
+			text = "Event creation cancelled. What would you like to do next?"
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getOrganizerMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			return
+		}
+
 		if update.Message.Photo != nil {
 			// Get the largest photo
 			largestPhoto := update.Message.Photo[len(update.Message.Photo)-1]
@@ -265,6 +553,15 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			params = &bot.SendMessageParams{
 				ChatID: chatID,
 				Text:   fmt.Sprintf("Image added. What's the answer to '%s'?", userState.LastQuestion),
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: true,
+				},
 			}
 			_, err := b.SendMessage(ctx, params)
 			if err != nil {
@@ -281,6 +578,15 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 				params = &bot.SendMessageParams{
 					ChatID: chatID,
 					Text:   fmt.Sprintf("What's the answer to '%s'?", userState.LastQuestion),
+					ReplyMarkup: &models.ReplyKeyboardMarkup{
+						Keyboard: [][]models.KeyboardButton{
+							{
+								{Text: "Cancel"},
+							},
+						},
+						ResizeKeyboard:  true,
+						OneTimeKeyboard: true,
+					},
 				}
 				_, err := b.SendMessage(ctx, params)
 				if err != nil {
@@ -292,6 +598,22 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		}
 
 	case model.StateAddingEventDetailsAnswer:
+		if update.Message.Text == "Cancel" {
+			text = "Event creation cancelled. What would you like to do next?"
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getOrganizerMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			return
+		}
+
 		// Get the previous question
 		answer := update.Message.Text
 
@@ -313,6 +635,29 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		// Update the user state
 		userState.State = model.StateAddingEventDetails
 		text = "Detail added. Send another question or 'done' to finish adding details and move to RSVP questions."
+
+		// Add done and cancel options
+		params = &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   text,
+			ReplyMarkup: &models.ReplyKeyboardMarkup{
+				Keyboard: [][]models.KeyboardButton{
+					{
+						{Text: "done"},
+					},
+					{
+						{Text: "Cancel"},
+					},
+				},
+				ResizeKeyboard:  true,
+				OneTimeKeyboard: false,
+			},
+		}
+		_, err := b.SendMessage(ctx, params)
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
+		return
 	case model.StateDeleteEvent:
 		eventID := update.Message.Text
 		err := o.FirebaseConnector.DeleteEvent(ctx, eventID)
@@ -427,6 +772,21 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 
 	// RSVP Handling
 	case model.StateAddingRSVPQuestion:
+		if update.Message.Text == "Cancel" {
+			text = "Event creation cancelled. What would you like to do next?"
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getOrganizerMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			return
+		}
 		if strings.ToLower(update.Message.Text) == "skip" {
 			// Save the event without RSVP questions
 			refKey, err := o.saveEvent(ctx, userState.CurrentEvent)
@@ -759,4 +1119,28 @@ func isNumeric(s string) bool {
 		}
 	}
 	return true
+}
+
+func getOrganizerMainMenuKeyboard() *models.ReplyKeyboardMarkup {
+	return &models.ReplyKeyboardMarkup{
+		Keyboard: [][]models.KeyboardButton{
+			{
+				{Text: "/addEvent"},
+				{Text: "/viewEvents"},
+			},
+			{
+				{Text: "/listParticipants"},
+				{Text: "/setCheckInCode"},
+			},
+			{
+				{Text: "/blast"},
+				{Text: "/deleteEvent"},
+			},
+			{
+				{Text: "/help"},
+			},
+		},
+		ResizeKeyboard:  true,
+		OneTimeKeyboard: false, // Set to false to keep the keyboard visible
+	}
 }

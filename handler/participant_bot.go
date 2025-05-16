@@ -62,21 +62,15 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 	case model.StateIdle:
 		switch {
 		case strings.HasPrefix(update.Message.Text, "/start"):
-			// Check if there's a parameter after /start
-			if len(update.Message.Text) > 7 { // "/start " is 7 characters
-				param := update.Message.Text[7:] // Extract parameter
+			// Process deep link if present
+			if len(update.Message.Text) > 7 {
+				param := update.Message.Text[7:]
 
-				// Check if it's a join event parameter
 				if strings.HasPrefix(param, "join_") {
 					eventID := strings.TrimPrefix(param, "join_")
 
-					// Set up the state for joining the event
 					userState.State = model.StateJoinEvent
-
-					// Update the message text to contain the event ID
 					p.update.Message.Text = eventID
-
-					// Directly call the join event handler with the event ID
 					p.handleJoinEvent(ctx)
 					return
 				}
@@ -88,30 +82,52 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 				username = p.update.Message.From.FirstName
 			}
 			text = fmt.Sprintf(`Hey %s! I'm your friendly event companion, here to make attending your events smooth and enjoyable—now and in the future.
-			Here's how I can help:
-			Quickly view events you're attending: /viewEvents
-			Revisit past events: /pastEvents
-			Join an event: /joinEvent
-			Keep track of your own notes and reminders for each event: /notes
-			Check in to an event: /checkIn
+	Here's how I can help:
+	Quickly view events you're attending: /viewEvents
+	Revisit past events: /pastEvents
+	Join an event: /joinEvent
+	Keep track of your own notes and reminders for each event: /notes
+	Check in to an event: /checkIn
 
-			Easily check-in at events using a simple code
-			Access useful event details and FAQs
-			Keep track of your own notes and reminders for each event
+	Easily check-in at events using a simple code
+	Access useful event details and FAQs
+	Keep track of your own notes and reminders for each event
 
-			Just type /help anytime to see what else I can do for you!`, username)
+	Just type /help anytime to see what else I can do for you!`, username)
+
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getParticipantMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			return
 
 		case update.Message.Text == "/help":
 			text = `
-			Commands:
-			/start – Start interacting with me and see a quick introduction.
-			/viewEvents – View your upcoming events and details.
-			/pastEvents – See events you've attended previously.
-			/joinEvent - Join an event (you'll be prompted to answer any RSVP questions).
-			/help – Get a reminder of commands and how to use me.
-			/notes - Add or view personal notes for an event.
-			/checkIn - Check in to an event.
-			`
+	Commands:
+	/start – Start interacting with me and see a quick introduction.
+	/viewEvents – View your upcoming events and details.
+	/pastEvents – See events you've attended previously.
+	/joinEvent - Join an event (you'll be prompted to answer any RSVP questions).
+	/help – Get a reminder of commands and how to use me.
+	/notes - Add or view personal notes for an event.
+	/checkIn - Check in to an event.
+	`
+
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getParticipantMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			return
 		case update.Message.Text == "/viewEvents":
 			p.viewEventsHandler(ctx, false)
 			return
@@ -120,13 +136,91 @@ func (p *ParticipantBotHandler) Handler(ctx context.Context, b *bot.Bot, update 
 			return
 		case update.Message.Text == "/joinEvent":
 			text = "Please provide the Event Reference Code of the event you want to join."
+
+			params = &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   text,
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: true,
+				},
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
 			userState.State = model.StateJoinEvent
+			return
+
 		case update.Message.Text == "/notes":
 			text = `Please provide the Event Reference Code to view/add personal notes.`
+
+			params = &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   text,
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: true,
+				},
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
 			userState.State = model.StatePersonalNotes
+			return
+
 		case update.Message.Text == "/checkIn":
 			text = "Please provide the Event Reference Code of the event you want to check in to."
+
+			params = &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   text,
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard: [][]models.KeyboardButton{
+						{
+							{Text: "Cancel"},
+						},
+					},
+					ResizeKeyboard:  true,
+					OneTimeKeyboard: true,
+				},
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
 			userState.State = model.StateCheckIn
+			return
+
+		// Add a case to handle the "Cancel" button in various states
+		case update.Message.Text == "Cancel":
+			text = "Operation cancelled. What would you like to do next?"
+
+			params = &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: getParticipantMainMenuKeyboard(),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+			userState.RSVPQuestionIndex = 0
+			userState.TempOptions = nil
+			return
 		default:
 			text = "I didn't understand that command. Use /start or /help."
 		}
@@ -993,6 +1087,15 @@ To check in on the day of the event, use the /checkIn command and the organizer 
 		userState := userPBotStates[userID]
 		userState.State = model.StateIdle
 	}
+
+	_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      userID,
+		Text:        "What would you like to do next?",
+		ReplyMarkup: getParticipantMainMenuKeyboard(),
+	})
+	if err != nil {
+		log.Println("error sending message:", err)
+	}
 }
 
 func (p *ParticipantBotHandler) viewEventsHandler(ctx context.Context, past bool) {
@@ -1250,4 +1353,26 @@ func (p *ParticipantBotHandler) sendEventDetailsWithImages(ctx context.Context, 
 	}
 
 	return nil
+}
+
+// Create a helper function to get the main menu keyboard for participants
+func getParticipantMainMenuKeyboard() *models.ReplyKeyboardMarkup {
+	return &models.ReplyKeyboardMarkup{
+		Keyboard: [][]models.KeyboardButton{
+			{
+				{Text: "/viewEvents"},
+				{Text: "/joinEvent"},
+			},
+			{
+				{Text: "/checkIn"},
+				{Text: "/notes"},
+			},
+			{
+				{Text: "/pastEvents"},
+				{Text: "/help"},
+			},
+		},
+		ResizeKeyboard:  true,
+		OneTimeKeyboard: false, // Set to false to keep the keyboard visible
+	}
 }
