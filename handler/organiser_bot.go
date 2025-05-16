@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -63,9 +64,13 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			/listParticipants <Event_Reference_Code> - List participants of an event
 			/blast <Event_Reference_Code> - Send a message to all participants
 			/viewEvents - View all your events
+			/setCheckInCode <Event_Reference_Code> - Set or update the check-in code for an event
 			/help - Show this help message`
 		case "/help":
 			text = "I'm your EventBot. I can help you manage events. Use /addEvent to start creating an event with details and RSVP questions, or /deleteEvent to delete an existing event."
+		case "/setCheckInCode":
+			text = "Please provide the Reference Code of the event you want to set a check-in code for."
+			userState.State = model.StateSettingEventCheckInCode
 		case "/addEvent":
 			text = "Okay, let's create a new event. What's the name of the event?"
 			userState.State = model.StateAddingEventName
@@ -93,11 +98,22 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 				for _, event := range events {
 					text += fmt.Sprintf("- %s (Reference Code: %s)\n", event.Name, event.ID)
 					text += fmt.Sprintf("  Date: %s\n", event.EventDate.Format("2006-01-02"))
+
+					// Show check-in code if set
+					if event.CheckInCode != "" {
+						text += fmt.Sprintf("  Check-in Code: %s\n", event.CheckInCode)
+					} else {
+						text += "  Check-in Code: Not set (use /setCheckInCode)\n"
+					}
+
 					if len(event.EventDetails) > 0 {
 						text += "  Details:\n"
 						for _, detail := range event.EventDetails {
 							text += fmt.Sprintf("    - Q: %s\n", detail.Question)
 							text += fmt.Sprintf("      A: %s\n", detail.Answer)
+							if detail.ImageFileURL != "" && detail.ImageFileURL != "N/A" {
+								text += "      (Has image)\n"
+							}
 						}
 					}
 					if len(event.RSVPQuestions) > 0 {
@@ -107,6 +123,9 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 							text += fmt.Sprintf("      Type: %s\n", getRSVPTypeString(q.Type))
 							if len(q.Options) > 0 {
 								text += "      Options: " + strings.Join(q.Options, ", ") + "\n"
+							}
+							if q.ImageFileURL != "" && q.ImageFileURL != "N/A" {
+								text += "      (Has image)\n"
 							}
 						}
 					}
@@ -159,25 +178,63 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			text = "Now, let's add RSVP questions for your participants. These will be required when participants join your event.\n\nPlease enter your first RSVP question or 'skip' if you don't want to add any RSVP questions."
 			userState.State = model.StateAddingRSVPQuestion
 		} else {
-			// Ask for the answer
+			// Store the question and ask if they want to add an image
 			question := update.Message.Text
-			if !strings.HasSuffix(question, "?") {
-				text = "Please make sure your question ends with a question mark '?'."
-				params = &bot.SendMessageParams{
-					ChatID: chatID,
-					Text:   text,
-				}
-				_, err := b.SendMessage(ctx, params)
-				if err != nil {
-					log.Println("error sending message:", err)
-				}
-				return
-			}
 			userState.LastQuestion = question // Store the question
-			// Create a new message to ask for the answer
+
+			// Create a keyboard for image options
+			keyboard := [][]models.KeyboardButton{
+				{
+					{Text: "Yes, add an image"},
+					{Text: "No, continue without image"},
+				},
+			}
+
+			// Create and send a message asking about adding an image
 			params = &bot.SendMessageParams{
 				ChatID: chatID,
-				Text:   fmt.Sprintf("What's the answer to '%s'?", question),
+				Text:   fmt.Sprintf("Would you like to add an image to the question: '%s'?", question),
+				ReplyMarkup: &models.ReplyKeyboardMarkup{
+					Keyboard:        keyboard,
+					OneTimeKeyboard: true,
+					ResizeKeyboard:  true,
+				},
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+
+			// Change state to wait for image decision
+			userState.State = model.StateAddingEventDetailsImage
+			return
+		}
+
+	// Add a new state for handling image decisions for event details
+	case model.StateAddingEventDetailsImage:
+		if update.Message.Text == "Yes, add an image" {
+			// Ask user to send the image
+			params = &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   "Please send the image for this question.",
+				ReplyMarkup: &models.ReplyKeyboardRemove{
+					RemoveKeyboard: true,
+				},
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			userState.State = model.StateAddingEventDetailsImageUpload
+			return
+		} else {
+			// No image, proceed to ask for the answer
+			params = &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   fmt.Sprintf("What's the answer to '%s'?", userState.LastQuestion),
+				ReplyMarkup: &models.ReplyKeyboardRemove{
+					RemoveKeyboard: true,
+				},
 			}
 			_, err := b.SendMessage(ctx, params)
 			if err != nil {
@@ -185,14 +242,74 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			}
 
 			// Wait for the answer in the next update
-			userState.State = model.StateAddingEventDetailsAnswer // Change state to wait for answer
+			userState.State = model.StateAddingEventDetailsAnswer
 			return
 		}
+
+	// Add a new state for handling image uploads for event details
+	case model.StateAddingEventDetailsImageUpload:
+		if update.Message.Photo != nil {
+			// Get the largest photo
+			largestPhoto := update.Message.Photo[len(update.Message.Photo)-1]
+
+			// Create a temporary QnA with image
+			tempQnA := model.QnA{
+				Question:    userState.LastQuestion,
+				ImageFileID: largestPhoto.FileID,
+			}
+
+			// Store it in temporary storage
+			userState.CurrentEvent.EventDetails = append(userState.CurrentEvent.EventDetails, tempQnA)
+
+			// Now ask for the answer
+			params = &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   fmt.Sprintf("Image added. What's the answer to '%s'?", userState.LastQuestion),
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+
+			userState.State = model.StateAddingEventDetailsAnswer
+			return
+		} else {
+			text = "Please send an image file or type 'skip' to continue without an image."
+
+			// If they typed 'skip', proceed to ask for the answer
+			if update.Message.Text == "skip" {
+				params = &bot.SendMessageParams{
+					ChatID: chatID,
+					Text:   fmt.Sprintf("What's the answer to '%s'?", userState.LastQuestion),
+				}
+				_, err := b.SendMessage(ctx, params)
+				if err != nil {
+					log.Println("error sending message:", err)
+				}
+				userState.State = model.StateAddingEventDetailsAnswer
+				return
+			}
+		}
+
 	case model.StateAddingEventDetailsAnswer:
 		// Get the previous question
 		answer := update.Message.Text
-		// Add the answer to the event details
-		userState.CurrentEvent.EventDetails = append(userState.CurrentEvent.EventDetails, model.QnA{Question: userState.LastQuestion, Answer: answer})
+
+		// Find the last QnA that was added (which might have an image) or create a new one
+		var lastQnA *model.QnA
+		if len(userState.CurrentEvent.EventDetails) > 0 &&
+			userState.CurrentEvent.EventDetails[len(userState.CurrentEvent.EventDetails)-1].Question == userState.LastQuestion {
+			// Update the existing QnA that has an image
+			lastQnA = &userState.CurrentEvent.EventDetails[len(userState.CurrentEvent.EventDetails)-1]
+			lastQnA.Answer = answer
+		} else {
+			// Add the answer to the event details as a new QnA
+			userState.CurrentEvent.EventDetails = append(userState.CurrentEvent.EventDetails, model.QnA{
+				Question: userState.LastQuestion,
+				Answer:   answer,
+			})
+		}
+
 		// Update the user state
 		userState.State = model.StateAddingEventDetails
 		text = "Detail added. Send another question or 'done' to finish adding details and move to RSVP questions."
@@ -230,7 +347,6 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 
 			for i := range participants {
 				text += fmt.Sprintf("- Name: %s\n", participants[i].Name)
-				text += fmt.Sprintf("  Code: %s\n", participants[i].Code)
 			}
 		}
 		userState.State = model.StateIdle
@@ -322,11 +438,14 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 				break
 			}
 
-			text = fmt.Sprintf("Event '%s' created successfully without RSVP questions! Here's the Reference Code: %s",
-				userState.CurrentEvent.Name, refKey)
+			err = o.sendEventCreationConfirmation(ctx, b, chatID, userState.CurrentEvent, refKey, false)
+			if err != nil {
+				log.Println("error sending confirmation:", err)
+			}
+
 			userState.State = model.StateIdle
 			userState.CurrentEvent = nil
-			break
+			return // We've already sent messages, so return instead of setting text
 		}
 
 		if strings.ToLower(update.Message.Text) == "done" {
@@ -340,11 +459,15 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 				break
 			}
 
-			text = fmt.Sprintf("Event '%s' created successfully with %d RSVP questions! Here's the Reference Code: %s",
-				userState.CurrentEvent.Name, len(userState.CurrentEvent.RSVPQuestions), refKey)
+			// Send event confirmation and deep link using the helper function
+			err = o.sendEventCreationConfirmation(ctx, b, chatID, userState.CurrentEvent, refKey, true)
+			if err != nil {
+				log.Println("error sending confirmation:", err)
+			}
+
 			userState.State = model.StateIdle
 			userState.CurrentEvent = nil
-			break
+			return // We've already sent messages, so return instead of setting text
 		}
 
 		// Create a new RSVP question
@@ -437,6 +560,44 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 				userState.State = model.StateAddingRSVPQuestion
 			}
 		}
+	case model.StateSettingEventCheckInCode:
+		eventID := update.Message.Text
+		event, err := o.FirebaseConnector.ReadEvent(ctx, eventID)
+		if err != nil {
+			log.Println("error reading event:", err)
+			text = fmt.Sprintf("Error retrieving event with ID '%s'. Please check the ID and try again.", eventID)
+			userState.State = model.StateIdle
+		} else {
+			userState.CurrentEvent = event
+
+			// Show current check-in code if it exists
+			currentCode := "not set"
+			if event.CheckInCode != "" {
+				currentCode = event.CheckInCode
+			}
+
+			text = fmt.Sprintf("Current check-in code for event '%s' is: %s\n\nPlease enter a new 4-digit check-in code for this event:", event.Name, currentCode)
+			userState.State = model.StateUpdatingEventCheckInCode
+		}
+	case model.StateUpdatingEventCheckInCode:
+		// Validate that the input is a 4-digit code
+		code := update.Message.Text
+		if len(code) != 4 || !isNumeric(code) {
+			text = "Please enter a valid 4-digit numeric code (e.g., 1234)."
+			break
+		}
+
+		// Update the event with the new check-in code
+		userState.CurrentEvent.CheckInCode = code
+		err := o.FirebaseConnector.UpdateEvent(ctx, userState.CurrentEvent.ID, *userState.CurrentEvent)
+		if err != nil {
+			log.Println("error updating event:", err)
+			text = "Error updating check-in code. Please try again."
+		} else {
+			text = fmt.Sprintf("Check-in code for event '%s' has been set to: %s", userState.CurrentEvent.Name, code)
+		}
+		userState.State = model.StateIdle
+		userState.CurrentEvent = nil
 
 	default:
 		text = "An error occurred."
@@ -456,6 +617,8 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 	}
 }
 
+// Update the saveEvent method in handler/organiser_bot.go to handle image URLs for event details
+
 // Helper function to save the event to Firebase
 func (o *OrganiserBotHandler) saveEvent(ctx context.Context, event *model.Event) (string, error) {
 	// Convert all file IDs to URLs
@@ -465,6 +628,18 @@ func (o *OrganiserBotHandler) saveEvent(ctx context.Context, event *model.Event)
 			log.Printf("Warning: Failed to convert EDM file ID to URL: %v", err)
 		} else {
 			event.EDMFileURL = url
+		}
+	}
+
+	// Convert event detail question image file IDs to URLs
+	for i := range event.EventDetails {
+		if event.EventDetails[i].ImageFileID != "" {
+			url, err := o.ImageService.ConvertFileIDToURL(ctx, event.EventDetails[i].ImageFileID)
+			if err != nil {
+				log.Printf("Warning: Failed to convert event detail image file ID to URL: %v", err)
+			} else {
+				event.EventDetails[i].ImageFileURL = url
+			}
 		}
 	}
 
@@ -518,4 +693,70 @@ func confirmRSVPQuestion(userState *model.UserState, imageFileID string) {
 	userState.CurrentEvent.RSVPQuestions = append(userState.CurrentEvent.RSVPQuestions, *userState.CurrentRSVPQuestion)
 	userState.CurrentRSVPQuestion = nil
 	userState.TempOptions = nil
+}
+
+func (o *OrganiserBotHandler) sendEventCreationConfirmation(ctx context.Context, b *bot.Bot, chatID int64, event *model.Event, refKey string, hasRSVP bool) error {
+	// Create success message text
+	var successText string
+	if hasRSVP {
+		successText = fmt.Sprintf("Event '%s' created successfully with %d RSVP questions!",
+			event.Name, len(event.RSVPQuestions))
+	} else {
+		successText = fmt.Sprintf("Event '%s' created successfully without RSVP questions!",
+			event.Name)
+	}
+
+	// Send success message
+	params := &bot.SendMessageParams{
+		ChatID:    chatID,
+		Text:      successText,
+		ParseMode: "HTML",
+	}
+	_, err := b.SendMessage(ctx, params)
+	if err != nil {
+		log.Println("error sending success message:", err)
+		return err
+	}
+
+	// Get participant bot username from environment variable
+	participantBotUsername := os.Getenv("PARTICIPANT_BOT_NAME")
+	if participantBotUsername == "" {
+		participantBotUsername = "your_participant_bot" // Fallback if not set
+	}
+
+	// Create deep link for participants
+	deepLink := fmt.Sprintf("https://t.me/%s?start=join_%s", participantBotUsername, refKey)
+
+	// Follow up with the reference code and join link as a separate message to make it copyable
+	codeMsg := &bot.SendMessageParams{
+		ChatID:    chatID,
+		Text:      fmt.Sprintf("Reference Code: <code>%s</code>\n\nParticipants can join using this link:\n%s", refKey, deepLink),
+		ParseMode: "HTML", // Using HTML parsing mode to enable code formatting
+	}
+	_, err = b.SendMessage(ctx, codeMsg)
+	if err != nil {
+		log.Println("error sending code message:", err)
+		return err
+	}
+
+	// Prompt for setting a check-in code
+	checkInMsg := &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   "Would you like to set a 4-digit check-in code for this event now? Type '/setCheckInCode " + refKey + "' to set it.",
+	}
+	_, err = b.SendMessage(ctx, checkInMsg)
+	if err != nil {
+		log.Println("error sending check-in code prompt:", err)
+	}
+
+	return nil
+}
+
+func isNumeric(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

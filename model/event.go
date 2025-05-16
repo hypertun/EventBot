@@ -23,11 +23,14 @@ type Event struct {
 	EventDetails  []QnA          `firestore:"eventDetails"`
 	RSVPQuestions []RSVPQuestion `firestore:"rsvpQuestions"`
 	Participants  []string       `firestore:"participants"` //list of participants by id
+	CheckInCode   string         `firestore:"checkInCode"`  // New field for the check-in code set by organizer
 }
 
 type QnA struct {
-	Question string
-	Answer   string
+	Question     string `firestore:"question"`
+	Answer       string `firestore:"answer"`
+	ImageFileID  string `firestore:"imageFileID"`  // Field for storing image file ID
+	ImageFileURL string `firestore:"imageFileURL"` // Field for storing image URL
 }
 
 type RSVPQuestion struct {
@@ -48,7 +51,6 @@ type Participant struct {
 	ID     string `firestore:"id"`
 	UserID int64  `firestore:"userid"`
 	Name   string `firestore:"name"`
-	Code   string `firestore:"code"`
 
 	SignedUpEvents []SignedUpEvent `firestore:"signedUpEvents"` //list of events by id
 }
@@ -71,6 +73,10 @@ const (
 	StateListParticipants
 	StateBlastMessage
 	StateAddingEventDetailsAnswer
+	StateAddingEventDetailsImage       // State for deciding about adding an image
+	StateAddingEventDetailsImageUpload // State for uploading an image
+	StateSettingEventCheckInCode       // New state for setting check-in code
+	StateUpdatingEventCheckInCode      // New state for updating check-in code
 
 	// New RSVP states for organiser
 	StateAddingRSVP
@@ -86,4 +92,5 @@ const (
 	StateJoinEvent
 	StateAnsweringRSVPQuestion
 	StateSelectEventForRSVP
+	StateEnteringCheckInCode // New state for entering check-in code
 )
