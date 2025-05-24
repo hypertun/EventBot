@@ -60,15 +60,17 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		switch update.Message.Text {
 		case "/start":
 			text = `Hello! I'm your EventBot. Use the following commands to manage events:
-			/addEvent - Create a new event with details and RSVP questions
-			/editEvent - Edit an existing event
-			/deleteEvent <Event_Reference_Code> - Delete an existing event
-			/listParticipants <Event_Reference_Code> - List participants of an event
-			/blast <Event_Reference_Code> - Send a message to all participants
-			/viewEvents - View all your events
-			/setCheckInCode <Event_Reference_Code> - Set or update the check-in code for an event
-			/addCoowner <Event_Reference_Code> <Coowner_Telegram_UserID> - Add a coowner to an event
-			/help - Show this help message`
+/addEvent - Create a new event with details and RSVP questions
+/editEvent - Edit an existing event
+/deleteEvent <Event_Reference_Code> - Delete an existing event
+/listParticipants <Event_Reference_Code> - List participants of an event
+/blast <Event_Reference_Code> - Send a message to all participants
+/viewEvents - View all your events
+/setCheckInCode <Event_Reference_Code> - Set or update the check-in code for an event
+/addCoowner <Event_Reference_Code> <User_ID> - Add a coowner to an event
+/removeCoowner <Event_Reference_Code> <User_ID> - Remove a coowner from an event
+/myid - Get your Telegram User ID
+/help - Show this help message`
 
 			params = &bot.SendMessageParams{
 				ChatID:      chatID,
@@ -216,10 +218,29 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 				}
 			}
 			userState.State = model.StateIdle
-			// New case for adding coowners
 		case "/addCoowner":
-			text = "Please provide the event reference code and the Telegram user ID of the coowner in the format: EVENT_ID USER_ID"
+			text = "To add a coowner, you need their Telegram User ID. Here's how to get it:\n\n" +
+				"1. Ask the user to use the /myid command\n" +
+				"2. They will receive their unique Telegram User ID\n" +
+				"3. Use that ID when adding them as a coowner"
+
 			userState.State = model.StateAddingCoowner
+		case "/myid":
+			text = fmt.Sprintf("Your Telegram User ID is: `%d`", update.Message.From.ID)
+			params = &bot.SendMessageParams{
+				ChatID:    chatID,
+				Text:      text,
+				ParseMode: "Markdown", // Use Markdown to format the ID
+			}
+			_, err := b.SendMessage(ctx, params)
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			return
+		case "/removeCoowner":
+			text = "Please provide the event reference code and the Telegram User ID of the coowner to remove in the format: EVENT_REF_CODE USER_ID\n\n" +
+				"You can use /myid to help find User IDs"
+			userState.State = model.StateRemovingCoowner
 		case "/editEvent":
 			text = "Please provide the Reference Code of the event you want to edit."
 			userState.State = model.StateEditEvent
@@ -1082,7 +1103,7 @@ Event Date: %s`, message, eventDetails, userState.CurrentEvent.Name, userState.C
 		// Split the input into event ID and user ID
 		parts := strings.Split(update.Message.Text, " ")
 		if len(parts) != 2 {
-			text = "Invalid format. Please use: EVENT_ID USER_ID"
+			text = "Invalid format. Please use: EVENT_REFERENCE_CODE USER_ID"
 			userState.State = model.StateIdle
 			break
 		}
@@ -1117,7 +1138,6 @@ Event Date: %s`, message, eventDetails, userState.CurrentEvent.Name, userState.C
 			text = fmt.Sprintf("Coowner with Telegram ID %d added successfully to event %s", coownerUserID, eventID)
 		}
 		userState.State = model.StateIdle
-
 	// New state for editing event
 	case model.StateEditEvent:
 		eventID := update.Message.Text
@@ -1181,7 +1201,7 @@ Event Date: %s`, message, eventDetails, userState.CurrentEvent.Name, userState.C
 
 	case model.StateEditEventName:
 		userState.CurrentEvent.Name = update.Message.Text
-		text = "Event name updated. Saving changes..."
+		text = "Event name updated. Saving changes."
 		err := o.FirebaseConnector.UpdateEvent(ctx, userState.CurrentEvent.ID, *userState.CurrentEvent)
 		if err != nil {
 			log.Println("error updating event:", err)
@@ -1199,7 +1219,7 @@ Event Date: %s`, message, eventDetails, userState.CurrentEvent.Name, userState.C
 		}
 
 		userState.CurrentEvent.EventDate = eventDate
-		text = "Event date updated. Saving changes..."
+		text = "Event date updated. Saving changes."
 		err = o.FirebaseConnector.UpdateEvent(ctx, userState.CurrentEvent.ID, *userState.CurrentEvent)
 		if err != nil {
 			log.Println("error updating event:", err)
@@ -1232,7 +1252,7 @@ Event Date: %s`, message, eventDetails, userState.CurrentEvent.Name, userState.C
 		// Update the answer
 		userState.CurrentEvent.EventDetails[index].Answer = update.Message.Text
 
-		text = "Event detail updated. Saving changes..."
+		text = "Event detail updated. Saving changes."
 		err := o.FirebaseConnector.UpdateEvent(ctx, userState.CurrentEvent.ID, *userState.CurrentEvent)
 		if err != nil {
 			log.Println("error updating event:", err)
@@ -1240,6 +1260,69 @@ Event Date: %s`, message, eventDetails, userState.CurrentEvent.Name, userState.C
 		}
 		userState.State = model.StateIdle
 		userState.CurrentEvent = nil
+	case model.StateRemovingCoowner:
+		// Split the input into event ID and user ID
+		parts := strings.Split(update.Message.Text, " ")
+		if len(parts) != 2 {
+			text = "Invalid format. Please use: EVENT_REF_CODE USER_ID\n" +
+				"Example: ABC123 123456789"
+			userState.State = model.StateIdle
+			break
+		}
+
+		eventID := parts[0]
+		coownerUserID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			text = "Invalid User ID. Please provide a valid Telegram User ID (numeric)."
+			userState.State = model.StateIdle
+			break
+		}
+
+		// Check ownership
+		isOwner, err := o.FirebaseConnector.IsEventOwner(ctx, eventID, userID)
+		if err != nil {
+			text = "Error checking event ownership. Please try again."
+			userState.State = model.StateIdle
+			break
+		}
+
+		if !isOwner {
+			text = "Only the event owner can remove coowners."
+			userState.State = model.StateIdle
+			break
+		}
+
+		// List current coowners before removal
+		currentCoowners, err := o.FirebaseConnector.ListCoowners(ctx, eventID)
+		if err != nil {
+			text = "Error retrieving current coowners."
+			userState.State = model.StateIdle
+			break
+		}
+
+		// Check if the user is actually a coowner
+		isCoowner := false
+		for _, existingCoowner := range currentCoowners {
+			if existingCoowner == coownerUserID {
+				isCoowner = true
+				break
+			}
+		}
+
+		if !isCoowner {
+			text = fmt.Sprintf("User ID %d is not a coowner of this event.", coownerUserID)
+			userState.State = model.StateIdle
+			break
+		}
+
+		// Remove the coowner
+		err = o.FirebaseConnector.RemoveCoowner(ctx, eventID, userID, coownerUserID)
+		if err != nil {
+			text = fmt.Sprintf("Error removing coowner: %v", err)
+		} else {
+			text = fmt.Sprintf("Coowner with Telegram User ID %d removed successfully from event %s", coownerUserID, eventID)
+		}
+		userState.State = model.StateIdle
 	default:
 		text = "An error occurred."
 		userState.State = model.StateIdle
@@ -1416,6 +1499,14 @@ func getOrganizerMainMenuKeyboard() *models.ReplyKeyboardMarkup {
 			{
 				{Text: "/blast"},
 				{Text: "/deleteEvent"},
+			},
+			{
+				{Text: "/editEvent"},
+				{Text: "/addCoowner"},
+			},
+			{
+				{Text: "/removeCoowner"},
+				{Text: "/myid"},
 			},
 			{
 				{Text: "/help"},

@@ -632,6 +632,16 @@ func (p *ParticipantBotHandler) saveRSVPAnswers(ctx context.Context, userState *
 		log.Println("error sending message:", err)
 	}
 
+	// Send main menu after RSVP completion
+	_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      p.update.Message.Chat.ID,
+		Text:        "What would you like to do next?",
+		ReplyMarkup: getParticipantMainMenuKeyboard(),
+	})
+	if err != nil {
+		log.Println("error sending message:", err)
+	}
+
 	// Reset the state
 	userState.State = model.StateIdle
 	userState.CurrentEvent = nil
@@ -1086,15 +1096,16 @@ To check in on the day of the event, use the /checkIn command and the organizer 
 		// No RSVP questions, joining is complete
 		userState := userPBotStates[userID]
 		userState.State = model.StateIdle
-	}
 
-	_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:      userID,
-		Text:        "What would you like to do next?",
-		ReplyMarkup: getParticipantMainMenuKeyboard(),
-	})
-	if err != nil {
-		log.Println("error sending message:", err)
+		// Send main menu after joining
+		_, err = p.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      userID,
+			Text:        "What would you like to do next?",
+			ReplyMarkup: getParticipantMainMenuKeyboard(),
+		})
+		if err != nil {
+			log.Println("error sending message:", err)
+		}
 	}
 }
 

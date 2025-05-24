@@ -361,3 +361,40 @@ func (fc *FirestoreConnector) AddCoowner(ctx context.Context, eventID string, pr
 	// Update the event
 	return fc.UpdateEvent(ctx, eventID, *event)
 }
+
+// RemoveCoowner removes a coowner from an event
+func (fc *FirestoreConnector) RemoveCoowner(ctx context.Context, eventID string, primaryOwnerID, coownerID int64) error {
+	// First, verify that the user trying to remove a coowner is the primary owner
+	event, err := fc.ReadEvent(ctx, eventID)
+	if err != nil {
+		return err
+	}
+
+	// Check if the primary owner is actually the owner
+	if event.UserID != primaryOwnerID {
+		return fmt.Errorf("only the primary owner can remove coowners")
+	}
+
+	// Find and remove the coowner
+	for i, existingCoowner := range event.Coowners {
+		if existingCoowner == coownerID {
+			// Remove the coowner by slicing
+			event.Coowners = append(event.Coowners[:i], event.Coowners[i+1:]...)
+
+			// Update the event
+			return fc.UpdateEvent(ctx, eventID, *event)
+		}
+	}
+
+	return fmt.Errorf("coowner not found")
+}
+
+// Helper method to list coowners
+func (fc *FirestoreConnector) ListCoowners(ctx context.Context, eventID string) ([]int64, error) {
+	event, err := fc.ReadEvent(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+
+	return event.Coowners, nil
+}

@@ -96,6 +96,7 @@ const (
 	// Coowner States
 	StateAddingCoowner
 	StateAddCoownerToEditedEvent
+	StateRemovingCoowner
 
 	//Participant Bot
 	StateCheckIn
