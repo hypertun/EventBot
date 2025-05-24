@@ -15,7 +15,8 @@ const (
 
 type Event struct {
 	ID            string         `firestore:"id"`
-	UserID        int64          `firestore:"userid"`
+	UserID        int64          `firestore:"userid"`   // Primary owner
+	Coowners      []int64        `firestore:"coowners"` // List of coowner user IDs
 	Name          string         `firestore:"name"`
 	EDMFileID     string         `firestore:"edmFileID"`
 	EDMFileURL    string         `firestore:"edmFileURL"`
@@ -77,6 +78,12 @@ const (
 	StateAddingEventDetailsImageUpload // State for uploading an image
 	StateSettingEventCheckInCode       // New state for setting check-in code
 	StateUpdatingEventCheckInCode      // New state for updating check-in code
+	StateEditEvent
+	StateSelectEditOption
+	StateEditEventName
+	StateEditEventDate
+	StateEditEventDetails
+	StateUpdateEventDetail
 
 	// New RSVP states for organiser
 	StateAddingRSVP
@@ -85,6 +92,10 @@ const (
 	StateAddingRSVPOptions
 	StateAddingRSVPImage
 	StateConfirmRSVPQuestion
+
+	// Coowner States
+	StateAddingCoowner
+	StateAddCoownerToEditedEvent
 
 	//Participant Bot
 	StateCheckIn

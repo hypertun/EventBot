@@ -88,12 +88,20 @@ func (fc *FirestoreConnector) DeleteEvent(ctx context.Context, eventID string) e
 	return nil
 }
 
-// ListEvents lists all events from Firestore
+// ListEventsByUserID now lists events where the user is owner or coowner
 func (fc *FirestoreConnector) ListEventsByUserID(ctx context.Context, userID int64) ([]model.Event, error) {
-	iter := fc.client.Collection("events").Where("userid", "==", userID).Documents(ctx)
+	// Get all events where the user is the primary owner
+	ownerIter := fc.client.Collection("events").Where("userid", "==", userID).Documents(ctx)
+
+	// Get all events where the user is a coowner
+	coownerIter := fc.client.Collection("events").Where("coowners", "array-contains", userID).Documents(ctx)
+
+	// Collect events
 	var events []model.Event
+
+	// Process owner events
 	for {
-		doc, err := iter.Next()
+		doc, err := ownerIter.Next()
 		if err == iterator.Done {
 			break
 		}
@@ -105,11 +113,43 @@ func (fc *FirestoreConnector) ListEventsByUserID(ctx context.Context, userID int
 		err = doc.DataTo(&event)
 		if err != nil {
 			log.Printf("error converting document data to event: %v", err)
-			continue // Skip this document and continue with the next one
+			continue
 		}
 		event.ID = doc.Ref.ID
 		events = append(events, event)
 	}
+
+	// Process coowner events
+	for {
+		doc, err := coownerIter.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		var event model.Event
+		err = doc.DataTo(&event)
+		if err != nil {
+			log.Printf("error converting document data to event: %v", err)
+			continue
+		}
+		event.ID = doc.Ref.ID
+
+		// Avoid duplicates
+		duplicate := false
+		for _, existingEvent := range events {
+			if existingEvent.ID == event.ID {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			events = append(events, event)
+		}
+	}
+
 	return events, nil
 }
 
@@ -284,4 +324,40 @@ func (fc *FirestoreConnector) ListEventsByParticipantUserID(ctx context.Context,
 // Close closes the Firestore client
 func (fc *FirestoreConnector) Close() error {
 	return fc.client.Close()
+}
+
+// IsEventOwner checks if the user is the owner or a coowner of the event
+func (fc *FirestoreConnector) IsEventOwner(ctx context.Context, eventID string, userID int64) (bool, error) {
+	event, err := fc.ReadEvent(ctx, eventID)
+	if err != nil {
+		return false, err
+	}
+
+	// Check if user is primary owner or in coowners list
+	return event.UserID == userID || slices.Contains(event.Coowners, userID), nil
+}
+
+// AddCoowner adds a coowner to an event
+func (fc *FirestoreConnector) AddCoowner(ctx context.Context, eventID string, primaryOwnerID, coownerID int64) error {
+	// First, verify that the user trying to add a coowner is the primary owner
+	event, err := fc.ReadEvent(ctx, eventID)
+	if err != nil {
+		return err
+	}
+
+	// Check if the primary owner is actually the owner
+	if event.UserID != primaryOwnerID {
+		return fmt.Errorf("only the primary owner can add coowners")
+	}
+
+	// Check if the coowner is already in the list
+	if slices.Contains(event.Coowners, coownerID) {
+		return fmt.Errorf("user is already a coowner")
+	}
+
+	// Add the coowner
+	event.Coowners = append(event.Coowners, coownerID)
+
+	// Update the event
+	return fc.UpdateEvent(ctx, eventID, *event)
 }

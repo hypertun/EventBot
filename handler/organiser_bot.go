@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,11 +61,13 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		case "/start":
 			text = `Hello! I'm your EventBot. Use the following commands to manage events:
 			/addEvent - Create a new event with details and RSVP questions
+			/editEvent - Edit an existing event
 			/deleteEvent <Event_Reference_Code> - Delete an existing event
 			/listParticipants <Event_Reference_Code> - List participants of an event
 			/blast <Event_Reference_Code> - Send a message to all participants
 			/viewEvents - View all your events
 			/setCheckInCode <Event_Reference_Code> - Set or update the check-in code for an event
+			/addCoowner <Event_Reference_Code> <Coowner_Telegram_UserID> - Add a coowner to an event
 			/help - Show this help message`
 
 			params = &bot.SendMessageParams{
@@ -213,6 +216,13 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 				}
 			}
 			userState.State = model.StateIdle
+			// New case for adding coowners
+		case "/addCoowner":
+			text = "Please provide the event reference code and the Telegram user ID of the coowner in the format: EVENT_ID USER_ID"
+			userState.State = model.StateAddingCoowner
+		case "/editEvent":
+			text = "Please provide the Reference Code of the event you want to edit."
+			userState.State = model.StateEditEvent
 		default:
 			text = "I didn't understand that command. Use /start or /help."
 		}
@@ -660,7 +670,23 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		return
 	case model.StateDeleteEvent:
 		eventID := update.Message.Text
-		err := o.FirebaseConnector.DeleteEvent(ctx, eventID)
+
+		// Check ownership
+		isOwner, err := o.FirebaseConnector.IsEventOwner(ctx, eventID, userID)
+		if err != nil {
+			log.Println("error checking event ownership:", err)
+			text = fmt.Sprintf("Error checking ownership for event with ID '%s'. Please check the ID and try again.", eventID)
+			userState.State = model.StateIdle
+			break
+		}
+
+		if !isOwner {
+			text = "Only the event owner can delete an event."
+			userState.State = model.StateIdle
+			break
+		}
+
+		err = o.FirebaseConnector.DeleteEvent(ctx, eventID)
 		if err != nil {
 			log.Println("error deleting event:", err)
 			text = fmt.Sprintf("Error deleting event with ID '%s'. Please check the ID and try again.", eventID)
@@ -670,6 +696,22 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		userState.State = model.StateIdle
 	case model.StateListParticipants:
 		eventID := update.Message.Text
+
+		// Check ownership
+		isOwner, err := o.FirebaseConnector.IsEventOwner(ctx, eventID, userID)
+		if err != nil {
+			log.Println("error checking event ownership:", err)
+			text = fmt.Sprintf("Error checking ownership for event with ID '%s'. Please check the ID and try again.", eventID)
+			userState.State = model.StateIdle
+			break
+		}
+
+		if !isOwner {
+			text = "Only the event owner can delete an event."
+			userState.State = model.StateIdle
+			break
+		}
+
 		event, err := o.FirebaseConnector.ReadEvent(ctx, eventID)
 		if err != nil {
 			log.Println("error reading event:", err)
@@ -685,7 +727,7 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 
 			participants, err := o.FirebaseConnector.ListParticipants(ctx, eventID)
 			if err != nil {
-				log.Println(fmt.Sprintf("error reading participants for event(ID: %s): %v", eventID, err))
+				log.Printf("error reading participants for event(ID: %s): %v\n", eventID, err)
 				text = fmt.Sprintf("Error reading participants for event with ID '%s'. Please check the ID and try again.",
 					eventID)
 			}
@@ -697,7 +739,35 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		userState.State = model.StateIdle
 	case model.StateBlastMessage:
 		if userState.CurrentEvent == nil {
-			event, err := o.FirebaseConnector.ReadEvent(ctx, update.Message.Text)
+			// First, check ownership of the event
+			eventID := update.Message.Text
+			isOwner, err := o.FirebaseConnector.IsEventOwner(ctx, eventID, userID)
+			if err != nil {
+				log.Println("error checking event ownership:", err)
+				_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+					ChatID: update.Message.Chat.ID,
+					Text:   "Error checking event ownership. Please try again.",
+				})
+				if err != nil {
+					log.Println("error sending message:", err)
+				}
+				userState.State = model.StateIdle
+				return
+			}
+
+			if !isOwner {
+				_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+					ChatID: update.Message.Chat.ID,
+					Text:   "Only the event owner or coowners can send messages to participants.",
+				})
+				if err != nil {
+					log.Println("error sending message:", err)
+				}
+				userState.State = model.StateIdle
+				return
+			}
+
+			event, err := o.FirebaseConnector.ReadEvent(ctx, eventID)
 			if err != nil {
 				log.Println("error reading event:", err)
 				_, err = b.SendMessage(ctx, &bot.SendMessageParams{
@@ -731,10 +801,38 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 
 		participants, err := o.FirebaseConnector.ListParticipants(ctx, eventID)
 		if err != nil {
-			log.Println(fmt.Sprintf("error reading participants for event(ID: %s): %v", eventID, err))
+			log.Printf("error reading participants for event(ID: %s): %v\n", eventID, err)
 			_, err = b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: update.Message.Chat.ID,
 				Text:   "Error retrieving participants. Please try again.",
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			return
+		}
+
+		// Get the participant bot token from environment variable
+		participantBotToken := os.Getenv("PARTICIPANT_BOT_TOKEN")
+		if participantBotToken == "" {
+			log.Println("Participant bot token not set")
+			_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: update.Message.Chat.ID,
+				Text:   "Error: Participant bot token not configured.",
+			})
+			if err != nil {
+				log.Println("error sending message:", err)
+			}
+			return
+		}
+
+		// Create a new bot instance for the participant bot
+		participantBot, err := bot.New(participantBotToken)
+		if err != nil {
+			log.Println("error creating participant bot:", err)
+			_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: update.Message.Chat.ID,
+				Text:   "Error creating participant bot. Please try again.",
 			})
 			if err != nil {
 				log.Println("error sending message:", err)
@@ -746,6 +844,9 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 			return participants[i].Name < participants[j].Name
 		})
 
+		successCount := 0
+		failureCount := 0
+
 		for _, participant := range participants {
 			var eventDetails string
 			if len(userState.CurrentEvent.EventDetails) > 0 {
@@ -755,20 +856,38 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 					eventDetails += fmt.Sprintf("    A: %s\n", detail.Answer)
 				}
 			}
-			_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+
+			fullMessage := fmt.Sprintf(`Message from the organiser:
+%s		
+%s
+Event Name: %s
+Event Date: %s`, message, eventDetails, userState.CurrentEvent.Name, userState.CurrentEvent.EventDate.Format("2006-01-02"))
+
+			// Send message using the participant bot
+			_, err = participantBot.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: participant.UserID,
-				Text: fmt.Sprintf(`Message from the organiser:
-		%s		
-		%s
-		Event Name: %s
-		Event Date: %s`, message, eventDetails, userState.CurrentEvent.Name, userState.CurrentEvent.EventDate.Format("2006-01-02")),
+				Text:   fullMessage,
 			})
+
 			if err != nil {
-				log.Println("error sending message:", err)
+				log.Printf("Error sending message to participant %d: %v", participant.UserID, err)
+				failureCount++
+			} else {
+				successCount++
 			}
 		}
 
-		text = fmt.Sprintf("Message sent to %d participants.", len(participants))
+		// Send summary to the organizer
+		summaryText := fmt.Sprintf("Message sent successfully to %d participants.\n%d participants could not receive the message.",
+			successCount, failureCount)
+
+		_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   summaryText,
+		})
+		if err != nil {
+			log.Println("error sending summary message:", err)
+		}
 
 	// RSVP Handling
 	case model.StateAddingRSVPQuestion:
@@ -958,7 +1077,169 @@ func (o *OrganiserBotHandler) Handler(ctx context.Context, b *bot.Bot, update *m
 		}
 		userState.State = model.StateIdle
 		userState.CurrentEvent = nil
+		// New state handling for adding coowners
+	case model.StateAddingCoowner:
+		// Split the input into event ID and user ID
+		parts := strings.Split(update.Message.Text, " ")
+		if len(parts) != 2 {
+			text = "Invalid format. Please use: EVENT_ID USER_ID"
+			userState.State = model.StateIdle
+			break
+		}
 
+		eventID := parts[0]
+		coownerUserID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			text = "Invalid user ID. Please provide a valid Telegram user ID."
+			userState.State = model.StateIdle
+			break
+		}
+
+		// Check if the user is the event owner
+		isOwner, err := o.FirebaseConnector.IsEventOwner(ctx, eventID, userID)
+		if err != nil {
+			text = "Error checking event ownership. Please try again."
+			userState.State = model.StateIdle
+			break
+		}
+
+		if !isOwner {
+			text = "Only the event owner can add coowners."
+			userState.State = model.StateIdle
+			break
+		}
+
+		// Add the coowner
+		err = o.FirebaseConnector.AddCoowner(ctx, eventID, userID, coownerUserID)
+		if err != nil {
+			text = fmt.Sprintf("Error adding coowner: %v", err)
+		} else {
+			text = fmt.Sprintf("Coowner with Telegram ID %d added successfully to event %s", coownerUserID, eventID)
+		}
+		userState.State = model.StateIdle
+
+	// New state for editing event
+	case model.StateEditEvent:
+		eventID := update.Message.Text
+
+		// Check ownership
+		isOwner, err := o.FirebaseConnector.IsEventOwner(ctx, eventID, userID)
+		if err != nil {
+			log.Println("error checking event ownership:", err)
+			text = fmt.Sprintf("Error checking ownership for event with ID '%s'. Please try again.", eventID)
+			userState.State = model.StateIdle
+			break
+		}
+
+		if !isOwner {
+			text = "Only the event owner or coowners can edit an event."
+			userState.State = model.StateIdle
+			break
+		}
+
+		// Retrieve the event
+		event, err := o.FirebaseConnector.ReadEvent(ctx, eventID)
+		if err != nil {
+			log.Println("error reading event:", err)
+			text = fmt.Sprintf("Error retrieving event with ID '%s'. Please check the ID and try again.", eventID)
+			userState.State = model.StateIdle
+			break
+		}
+
+		userState.CurrentEvent = event
+
+		// Provide editing options
+		text = fmt.Sprintf("Editing event '%s'. Choose what you want to edit:\n"+
+			"1. Event Name\n"+
+			"2. Event Date\n"+
+			"3. Event Details\n"+
+			"4. Cancel Edit", event.Name)
+		userState.State = model.StateSelectEditOption
+
+	case model.StateSelectEditOption:
+		switch update.Message.Text {
+		case "1":
+			text = "Enter the new event name:"
+			userState.State = model.StateEditEventName
+		case "2":
+			text = "Enter the new event date (YYYY-MM-DD):"
+			userState.State = model.StateEditEventDate
+		case "3":
+			text = "Current event details:\n"
+			for i, detail := range userState.CurrentEvent.EventDetails {
+				text += fmt.Sprintf("%d. Q: %s\n   A: %s\n", i+1, detail.Question, detail.Answer)
+			}
+			text += "\nEnter the number of the detail you want to edit:"
+			userState.State = model.StateEditEventDetails
+		case "4":
+			text = "Event editing cancelled."
+			userState.State = model.StateIdle
+			userState.CurrentEvent = nil
+		default:
+			text = "Invalid option. Please choose 1-4."
+		}
+
+	case model.StateEditEventName:
+		userState.CurrentEvent.Name = update.Message.Text
+		text = "Event name updated. Saving changes..."
+		err := o.FirebaseConnector.UpdateEvent(ctx, userState.CurrentEvent.ID, *userState.CurrentEvent)
+		if err != nil {
+			log.Println("error updating event:", err)
+			text = "Error updating event name. Please try again."
+		}
+		userState.State = model.StateIdle
+		userState.CurrentEvent = nil
+
+	case model.StateEditEventDate:
+		// Validate the date format
+		eventDate, err := time.Parse("2006-01-02", update.Message.Text)
+		if err != nil || eventDate.Before(time.Now()) {
+			text = "Invalid date format. Please use 'YYYY-MM-DD' (e.g., 2023-12-25) and ensure it's not in the past."
+			break
+		}
+
+		userState.CurrentEvent.EventDate = eventDate
+		text = "Event date updated. Saving changes..."
+		err = o.FirebaseConnector.UpdateEvent(ctx, userState.CurrentEvent.ID, *userState.CurrentEvent)
+		if err != nil {
+			log.Println("error updating event:", err)
+			text = "Error updating event date. Please try again."
+		}
+		userState.State = model.StateIdle
+		userState.CurrentEvent = nil
+
+	case model.StateEditEventDetails:
+		// Try to parse the index of the detail to edit
+		index, err := strconv.Atoi(update.Message.Text)
+		if err != nil || index < 1 || index > len(userState.CurrentEvent.EventDetails) {
+			text = "Invalid detail number. Please choose a valid number."
+			break
+		}
+
+		// Adjust for zero-based indexing
+		index--
+		text = fmt.Sprintf("Current detail: Q: %s, A: %s\nEnter the new answer:",
+			userState.CurrentEvent.EventDetails[index].Question,
+			userState.CurrentEvent.EventDetails[index].Answer)
+
+		userState.LastQuestion = strconv.Itoa(index) // Store the index to know which detail to update
+		userState.State = model.StateUpdateEventDetail
+
+	case model.StateUpdateEventDetail:
+		// Get the stored index of the detail to update
+		index, _ := strconv.Atoi(userState.LastQuestion)
+
+		// Update the answer
+		userState.CurrentEvent.EventDetails[index].Answer = update.Message.Text
+
+		text = "Event detail updated. Saving changes..."
+		err := o.FirebaseConnector.UpdateEvent(ctx, userState.CurrentEvent.ID, *userState.CurrentEvent)
+		if err != nil {
+			log.Println("error updating event:", err)
+			text = "Error updating event detail. Please try again."
+		}
+		userState.State = model.StateIdle
+		userState.CurrentEvent = nil
 	default:
 		text = "An error occurred."
 		userState.State = model.StateIdle
